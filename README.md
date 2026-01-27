@@ -123,3 +123,42 @@ rdma_intercept_ldpreload/
 6. 开发完整的资源管理策略
 7. 提供Web管理界面
 8. 支持更多RDMA资源类型的监控和控制
+
+## 未来扩展计划
+
+### ✅ 已实现的监控
+- **QP创建监控**: 拦截`ibv_create_qp`和`ibv_create_qp_ex`函数
+- **QP注销监控**: 拦截`ibv_destroy_qp`函数，确保QP计数准确
+- **CQ监控**: 拦截`ibv_create_cq`和`ibv_destroy_cq`函数
+- **PD监控**: 拦截`ibv_alloc_pd`和`ibv_dealloc_pd`函数
+
+### 📋 计划扩展的RDMA控制原语
+1. **内存注册/注销**
+   - `ibv_reg_mr` / `ibv_dereg_mr`
+   - 监控内存资源使用情况
+
+2. **SRQ管理**
+   - `ibv_create_srq` / `ibv_destroy_srq`
+   - 支持SRQ数量控制
+
+3. **AH管理**
+   - `ibv_create_ah` / `ibv_destroy_ah`
+   - 监控地址句柄使用情况
+
+4. **CQ事件处理**
+   - `ibv_get_cq_event` / `ibv_ack_cq_events`
+   - 监控CQ事件处理性能
+
+5. **QP状态转换**
+   - `ibv_modify_qp`
+   - 监控QP状态变化
+
+6. **多端口支持**
+   - 扩展到多RDMA端口环境
+   - 支持端口级别的资源控制
+
+### 🎯 扩展目标
+- **全面监控**: 覆盖所有关键RDMA原语
+- **精细控制**: 支持更细粒度的资源管理
+- **性能优化**: 提供性能分析和优化建议
+- **可靠性提升**: 增强错误处理和故障恢复能力
