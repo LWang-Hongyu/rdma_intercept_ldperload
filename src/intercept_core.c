@@ -1,0 +1,141 @@
+#define _GNU_SOURCE
+#include <dlfcn.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <pthread.h>
+#include <time.h>
+#include <unistd.h>
+#include <errno.h>
+#include <stdarg.h>
+#include "rdma_intercept.h"
+
+/* 全局状态 */
+intercept_state_t g_intercept_state = {
+    .initialized = false,
+    .config = {
+        .enable_intercept = true,
+        .log_qp_creation = true,
+        .log_all_operations = false,
+        .log_level = LOG_LEVEL_INFO,
+        .log_file_path = "/tmp/rdma_intercept.log",
+        
+        /* 资源管理和性能隔离默认配置 */
+        .enable_qp_control = false,  /* 默认关闭QP控制 */
+        .max_qp_per_process = 100,   /* 默认每个进程最多100个QP */
+        .max_send_wr_limit = 1024,   /* 默认发送WR限制1024 */
+        .max_recv_wr_limit = 1024,   /* 默认接收WR限制1024 */
+        .allow_rc_qp = true,         /* 默认允许RC类型 */
+        .allow_uc_qp = true,         /* 默认允许UC类型 */
+        .allow_ud_qp = true          /* 默认允许UD类型 */
+    },
+    .log_file = NULL,
+    .log_mutex = PTHREAD_MUTEX_INITIALIZER,
+    .qp_count = 0,                  /* 当前进程QP计数 */
+    .qp_list = NULL                 /* QP列表 */
+};
+
+/* 函数指针类型定义 */
+typedef struct ibv_qp *(*ibv_create_qp_fn)(struct ibv_pd *, struct ibv_qp_init_attr *);
+typedef struct ibv_qp *(*ibv_create_qp_ex_fn)(struct ibv_context *, struct ibv_qp_init_attr_ex *);
+
+/* 原始函数指针存储 */
+static ibv_create_qp_fn real_ibv_create_qp = NULL;
+static ibv_create_qp_ex_fn real_ibv_create_qp_ex = NULL;
+
+/* 初始化函数 */
+int rdma_intercept_init(void) {
+    if (g_intercept_state.initialized) {
+        return 0;
+    }
+
+    errno = 0;
+
+    /* 打开日志文件 */
+    g_intercept_state.log_file = fopen(g_intercept_state.config.log_file_path, "a");
+    if (!g_intercept_state.log_file) {
+        fprintf(stderr, "[RDMA_INTERCEPT] Failed to open log file: %s\n", 
+                g_intercept_state.config.log_file_path);
+        errno = EIO;
+        return -1;
+    }
+    
+    /* 加载配置（包括环境变量） */
+    rdma_intercept_load_config(NULL);
+
+    /* 直接打开libibverbs.so获取原始函数地址 */
+    void *libibverbs = dlopen("libibverbs.so", RTLD_LAZY);
+    if (!libibverbs) {
+        fprintf(stderr, "[RDMA_INTERCEPT] Failed to open libibverbs.so: %s\n", dlerror());
+        fclose(g_intercept_state.log_file);
+        errno = ENOSYS;
+        return -1;
+    }
+    
+    /* 获取原始ibv_create_qp函数地址 */
+    dlerror(); // 清除之前的错误
+    real_ibv_create_qp = (ibv_create_qp_fn)dlsym(libibverbs, "ibv_create_qp");
+    
+    if (!real_ibv_create_qp) {
+        fprintf(stderr, "[RDMA_INTERCEPT] Failed to find ibv_create_qp in libibverbs: %s\n", dlerror());
+        dlclose(libibverbs);
+        fclose(g_intercept_state.log_file);
+        errno = ENOSYS;
+        return -1;
+    }
+    
+    fprintf(stderr, "[RDMA_INTERCEPT] Found ibv_create_qp in libibverbs at: %p\n", real_ibv_create_qp);
+    
+    // ibv_create_qp_ex是内联函数，可能不存在于库中，所以不检查错误
+    dlerror(); // 清除之前的错误
+    real_ibv_create_qp_ex = (ibv_create_qp_ex_fn)dlsym(libibverbs, "ibv_create_qp_ex");
+    dlerror(); // 忽略错误信息
+    
+    // 关闭libibverbs句柄
+    dlclose(libibverbs);
+
+    fprintf(g_intercept_state.log_file, "[INFO] RDMA Intercept initialized successfully\n");
+    fprintf(g_intercept_state.log_file, "[INFO] ibv_create_qp: %p\n", real_ibv_create_qp);
+    fprintf(g_intercept_state.log_file, "[INFO] ibv_create_qp_ex: %p\n", real_ibv_create_qp_ex);
+
+    g_intercept_state.initialized = true;
+    return 0;
+}
+
+/* 清理函数 */
+void rdma_intercept_cleanup(void) {
+    if (!g_intercept_state.initialized) {
+        return;
+    }
+
+    if (g_intercept_state.log_file) {
+        fprintf(g_intercept_state.log_file, "[INFO] RDMA Intercept cleanup\n");
+        fclose(g_intercept_state.log_file);
+        g_intercept_state.log_file = NULL;
+    }
+
+    g_intercept_state.initialized = false;
+}
+
+/* 配置函数 - 这些函数现在只在intercept_core.c中定义 */
+
+/* 版本信息 */
+const char *rdma_intercept_version(void) {
+    static const char *version = "1.0.0";
+    return version;
+}
+
+/* 检查是否启用 */
+bool rdma_intercept_is_enabled(void) {
+    return g_intercept_state.initialized && g_intercept_state.config.enable_intercept;
+}
+
+/* 构造函数 - 自动初始化 */
+__attribute__((constructor))
+static void intercept_constructor(void) {
+    const char *env_var = getenv("RDMA_INTERCEPT_ENABLE");
+    
+    if (env_var && strcmp(env_var, "1") == 0) {
+        rdma_intercept_init();
+    }
+}
