@@ -43,6 +43,24 @@ typedef struct ibv_qp *(*ibv_create_qp_ex_fn)(struct ibv_context *, struct ibv_q
 static ibv_create_qp_fn real_ibv_create_qp = NULL;
 static ibv_create_qp_ex_fn real_ibv_create_qp_ex = NULL;
 
+/* 延迟初始化相关变量 */
+pthread_once_t init_once = PTHREAD_ONCE_INIT;
+
+/* 按需初始化函数 */
+void init_if_needed(void) {
+    /* 检查是否启用拦截 */
+    const char *env_var = getenv("RDMA_INTERCEPT_ENABLE");
+    if (!env_var || strcmp(env_var, "1") != 0) {
+        return; /* 未启用拦截，直接返回 */
+    }
+
+    /* 初始化拦截功能 */
+    if (rdma_intercept_init() != 0) {
+        /* 初始化失败，记录错误但不中断进程 */
+        fprintf(stderr, "[RDMA_INTERCEPT] 初始化失败，拦截功能将不可用\n");
+    }
+}
+
 /* 初始化函数 */
 int rdma_intercept_init(void) {
     if (g_intercept_state.initialized) {
@@ -133,9 +151,5 @@ bool rdma_intercept_is_enabled(void) {
 /* 构造函数 - 自动初始化 */
 __attribute__((constructor))
 static void intercept_constructor(void) {
-    const char *env_var = getenv("RDMA_INTERCEPT_ENABLE");
-    
-    if (env_var && strcmp(env_var, "1") == 0) {
-        rdma_intercept_init();
-    }
+    /* 空函数，不再执行主动初始化 */
 }

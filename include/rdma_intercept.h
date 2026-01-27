@@ -82,6 +82,10 @@ typedef struct {
 /* 全局状态 */
 extern intercept_state_t g_intercept_state;
 
+/* 延迟初始化相关 */
+extern pthread_once_t init_once;
+extern void init_if_needed(void);
+
 /* 初始化函数 */
 int rdma_intercept_init(void);
 void rdma_intercept_cleanup(void);

@@ -36,6 +36,21 @@ static uint32_t max_global_qp = 10; // 默认全局QP上限
 static pthread_mutex_t qp_count_mutex = PTHREAD_MUTEX_INITIALIZER;
 static int qp_counts_map_fd = -1; // eBPF映射文件描述符
 
+// 获取全局QP上限
+static void update_max_global_qp(void) {
+    // 从环境变量读取全局QP上限
+    const char *max_qp_str = getenv("RDMA_INTERCEPT_MAX_GLOBAL_QP");
+    if (max_qp_str) {
+        uint32_t new_max = atoi(max_qp_str);
+        if (new_max > 0) {
+            pthread_mutex_lock(&qp_count_mutex);
+            max_global_qp = new_max;
+            pthread_mutex_unlock(&qp_count_mutex);
+            printf("更新全局QP上限为: %u\n", new_max);
+        }
+    }
+}
+
 // 信号处理函数
 static void signal_handler(int sig __attribute__((unused)))
 {
@@ -69,56 +84,7 @@ static int create_bpf_map(void)
     return fd;
 }
 
-// 计算全局QP计数
-static void calculate_global_qp_count(void)
-{
-    if (qp_counts_map_fd < 0) {
-        // 如果eBPF映射文件描述符无效，使用当前的全局QP计数
-        return;
-    }
 
-    // 从eBPF映射中读取真实的QP计数
-    uint32_t total_qp_count = 0;
-    uint32_t key = 0;
-    uint32_t next_key = 0;
-    int err = 0;
-
-    // 遍历eBPF哈希表
-    while (1) {
-        // 获取下一个键
-        err = syscall(__NR_bpf, BPF_MAP_GET_NEXT_KEY, qp_counts_map_fd, &key, &next_key);
-        if (err < 0) {
-            if (errno == ENOENT) {
-                // 遍历结束
-                break;
-            }
-            // 其他错误，退出遍历
-            fprintf(stderr, "bpf_map_get_next_key失败: %d\n", errno);
-            break;
-        }
-
-        // 查找当前键对应的值
-        uint32_t value = 0;
-        err = syscall(__NR_bpf, BPF_MAP_LOOKUP_ELEM, qp_counts_map_fd, &next_key, &value);
-        if (err < 0) {
-            fprintf(stderr, "bpf_map_lookup_elem失败: %d\n", errno);
-        } else {
-            // 累加QP计数
-            total_qp_count += value;
-        }
-
-        // 更新键为下一个键
-        key = next_key;
-    }
-
-    // 更新全局QP计数
-    if (total_qp_count > 0) {
-        pthread_mutex_lock(&qp_count_mutex);
-        global_qp_count = total_qp_count;
-        pthread_mutex_unlock(&qp_count_mutex);
-        printf("从eBPF映射中读取QP计数: %u\n", total_qp_count);
-    }
-}
 
 
 // 初始化数据收集服务
@@ -126,6 +92,9 @@ static int initialize_service(void)
 {
     // 初始化全局QP计数为0
     global_qp_count = 0;
+    
+    // 从环境变量读取全局QP上限
+    update_max_global_qp();
     
     // 获取eBPF映射文件描述符
     qp_counts_map_fd = get_bpf_map_fd("/sys/fs/bpf/qp_counts");
@@ -244,9 +213,6 @@ static void main_loop(void)
 
                 // 处理GET_STATS请求
                 if (strcmp(buffer, "GET_STATS") == 0) {
-                    // 计算最新的全局QP计数
-                    calculate_global_qp_count();
-
                     // 构建响应
                     char response[256];
                     pthread_mutex_lock(&qp_count_mutex);
@@ -335,8 +301,18 @@ int main(int argc __attribute__((unused)), char *argv[] __attribute__((unused)))
 {
     int err;
 
+    // 在变成守护进程之前，先读取环境变量中的全局QP上限
+    const char *max_qp_str = getenv("RDMA_INTERCEPT_MAX_GLOBAL_QP");
+    uint32_t env_max_global_qp = 0;
+    if (max_qp_str) {
+        env_max_global_qp = atoi(max_qp_str);
+        printf("从环境变量读取全局QP上限: %s -> %u\n", max_qp_str, env_max_global_qp);
+    } else {
+        printf("未找到RDMA_INTERCEPT_MAX_GLOBAL_QP环境变量\n");
+    }
+
     // 将进程变成守护进程
-    if (daemon(0, 0) < 0) {
+    if (daemon(0, 1) < 0) {
         fprintf(stderr, "无法创建守护进程: %d\n", errno);
         return 1;
     }
@@ -350,6 +326,14 @@ int main(int argc __attribute__((unused)), char *argv[] __attribute__((unused)))
     if (err) {
         fprintf(stderr, "初始化数据收集服务失败\n");
         return 1;
+    }
+    
+    // 使用之前读取的环境变量值更新全局QP上限
+    if (env_max_global_qp > 0) {
+        pthread_mutex_lock(&qp_count_mutex);
+        max_global_qp = env_max_global_qp;
+        pthread_mutex_unlock(&qp_count_mutex);
+        printf("从环境变量更新全局QP上限为: %u\n", env_max_global_qp);
     }
 
     // 启动服务器

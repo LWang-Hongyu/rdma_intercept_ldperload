@@ -8,8 +8,7 @@
 #include <sys/stat.h>
 #include "rdma_intercept.h"
 
-/* 日志缓冲区 */
-static char log_buffer[MAX_LOG_BUFFER_SIZE];
+
 static pthread_mutex_t log_file_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 /* 获取当前时间字符串 */
@@ -77,6 +76,12 @@ void rdma_intercept_log_internal(log_level_t level, const char *file, int line,
     va_list args;
     char time_str[64];
     const char *level_str;
+    char local_buffer[MAX_LOG_BUFFER_SIZE];
+    
+    /* 预格式化消息，减少锁持有时间 */
+    va_start(args, format);
+    vsnprintf(local_buffer, sizeof(local_buffer), format, args);
+    va_end(args);
     
     /* 获取时间 */
     get_current_time_string(time_str, sizeof(time_str));
@@ -84,30 +89,30 @@ void rdma_intercept_log_internal(log_level_t level, const char *file, int line,
     /* 获取日志级别 */
     level_str = get_log_level_string(level);
     
-    /* 格式化消息 */
-    va_start(args, format);
-    vsnprintf(log_buffer, sizeof(log_buffer), format, args);
-    va_end(args);
-    
-    /* 写入日志文件 */
-    pthread_mutex_lock(&log_file_mutex);
+    /* 写入日志文件（只在必要时加锁） */
     if (g_intercept_state.log_file) {
-        if (g_intercept_state.config.log_level <= LOG_LEVEL_DEBUG) {
-            /* 调试模式包含文件位置信息 */
-            fprintf(g_intercept_state.log_file, "[%s] [%s] [PID:%d] [%s:%d] %s: %s\n",
-                    time_str, level_str, getpid(), file, line, func, log_buffer);
-        } else {
-            /* 普通模式 */
-            fprintf(g_intercept_state.log_file, "[%s] [%s] [PID:%d] %s\n",
-                    time_str, level_str, getpid(), log_buffer);
+        pthread_mutex_lock(&log_file_mutex);
+        if (g_intercept_state.log_file) {
+            if (g_intercept_state.config.log_level <= LOG_LEVEL_DEBUG) {
+                /* 调试模式包含文件位置信息 */
+                fprintf(g_intercept_state.log_file, "[%s] [%s] [PID:%d] [%s:%d] %s: %s\n",
+                        time_str, level_str, getpid(), file, line, func, local_buffer);
+            } else {
+                /* 普通模式 */
+                fprintf(g_intercept_state.log_file, "[%s] [%s] [PID:%d] %s\n",
+                        time_str, level_str, getpid(), local_buffer);
+            }
+            /* 减少fflush调用，只在关键级别或配置要求时刷新 */
+            if (level >= LOG_LEVEL_ERROR || g_intercept_state.config.log_level <= LOG_LEVEL_DEBUG) {
+                fflush(g_intercept_state.log_file);
+            }
         }
-        fflush(g_intercept_state.log_file);
+        pthread_mutex_unlock(&log_file_mutex);
     }
-    pthread_mutex_unlock(&log_file_mutex);
     
     /* 致命错误时同时输出到stderr */
     if (level == LOG_LEVEL_FATAL) {
-        fprintf(stderr, "[RDMA_INTERCEPT] [%s] %s\n", level_str, log_buffer);
+        fprintf(stderr, "[RDMA_INTERCEPT] [%s] %s\n", level_str, local_buffer);
     }
 }
 
@@ -238,34 +243,39 @@ void rdma_intercept_log_qp_creation(const qp_creation_info_t *info) {
     char time_str[64];
     struct tm *tm_info;
     
-    /* 转换时间戳为人类可读格式 */
+    /* 转换时间戳为人类可读格式（预计算，减少锁持有时间） */
     tm_info = localtime(&info->timestamp);
     snprintf(time_str, sizeof(time_str), "%04d-%02d-%02d %02d:%02d:%02d",
              tm_info->tm_year + 1900, tm_info->tm_mon + 1, tm_info->tm_mday,
              tm_info->tm_hour, tm_info->tm_min, tm_info->tm_sec);
     
-    /* 写入QP创建详细信息到日志文件 */
-    pthread_mutex_lock(&log_file_mutex);
+    /* 写入QP创建详细信息到日志文件（只在必要时加锁） */
     if (g_intercept_state.log_file) {
-        fprintf(g_intercept_state.log_file, "===== QP Creation Event =====\n");
-        fprintf(g_intercept_state.log_file, "[Timestamp] %s\n", time_str);
-        fprintf(g_intercept_state.log_file, "[PID] %d\n", info->pid);
-        fprintf(g_intercept_state.log_file, "[TID] %lu\n", info->tid);
-        fprintf(g_intercept_state.log_file, "[QP Address] %p\n", info->pd ? info->pd : NULL);
-        fprintf(g_intercept_state.log_file, "[Context] %p\n", info->context);
-        fprintf(g_intercept_state.log_file, "[QP Type] %d\n", info->qp_type);
-        fprintf(g_intercept_state.log_file, "[Max Send WR] %u\n", info->max_send_wr);
-        fprintf(g_intercept_state.log_file, "[Max Recv WR] %u\n", info->max_recv_wr);
-        fprintf(g_intercept_state.log_file, "[Max Send SGE] %u\n", info->max_send_sge);
-        fprintf(g_intercept_state.log_file, "[Max Recv SGE] %u\n", info->max_recv_sge);
-        fprintf(g_intercept_state.log_file, "[Max Inline Data] %u bytes\n", info->max_inline_data);
-        fprintf(g_intercept_state.log_file, "[Send CQ] %p\n", info->send_cq);
-        fprintf(g_intercept_state.log_file, "[Recv CQ] %p\n", info->recv_cq);
-        fprintf(g_intercept_state.log_file, "[SRQ] %p\n", info->srq);
-        fprintf(g_intercept_state.log_file, "=============================\n");
-        fflush(g_intercept_state.log_file);
+        pthread_mutex_lock(&log_file_mutex);
+        if (g_intercept_state.log_file) {
+            fprintf(g_intercept_state.log_file, "===== QP Creation Event =====\n");
+            fprintf(g_intercept_state.log_file, "[Timestamp] %s\n", time_str);
+            fprintf(g_intercept_state.log_file, "[PID] %d\n", info->pid);
+            fprintf(g_intercept_state.log_file, "[TID] %lu\n", info->tid);
+            fprintf(g_intercept_state.log_file, "[QP Address] %p\n", info->pd ? info->pd : NULL);
+            fprintf(g_intercept_state.log_file, "[Context] %p\n", info->context);
+            fprintf(g_intercept_state.log_file, "[QP Type] %d\n", info->qp_type);
+            fprintf(g_intercept_state.log_file, "[Max Send WR] %u\n", info->max_send_wr);
+            fprintf(g_intercept_state.log_file, "[Max Recv WR] %u\n", info->max_recv_wr);
+            fprintf(g_intercept_state.log_file, "[Max Send SGE] %u\n", info->max_send_sge);
+            fprintf(g_intercept_state.log_file, "[Max Recv SGE] %u\n", info->max_recv_sge);
+            fprintf(g_intercept_state.log_file, "[Max Inline Data] %u bytes\n", info->max_inline_data);
+            fprintf(g_intercept_state.log_file, "[Send CQ] %p\n", info->send_cq);
+            fprintf(g_intercept_state.log_file, "[Recv CQ] %p\n", info->recv_cq);
+            fprintf(g_intercept_state.log_file, "[SRQ] %p\n", info->srq);
+            fprintf(g_intercept_state.log_file, "=============================\n");
+            /* 减少fflush调用，只在必要时刷新 */
+            if (g_intercept_state.config.log_level <= LOG_LEVEL_DEBUG) {
+                fflush(g_intercept_state.log_file);
+            }
+        }
+        pthread_mutex_unlock(&log_file_mutex);
     }
-    pthread_mutex_unlock(&log_file_mutex);
 }
 
 /* 简化的日志函数（供其他模块调用） */
@@ -277,6 +287,12 @@ void rdma_intercept_log(log_level_t level, const char *format, ...) {
     va_list args;
     char time_str[64];
     const char *level_str;
+    char local_buffer[MAX_LOG_BUFFER_SIZE];
+    
+    /* 预格式化消息，减少锁持有时间 */
+    va_start(args, format);
+    vsnprintf(local_buffer, sizeof(local_buffer), format, args);
+    va_end(args);
     
     /* 获取时间 */
     get_current_time_string(time_str, sizeof(time_str));
@@ -284,17 +300,17 @@ void rdma_intercept_log(log_level_t level, const char *format, ...) {
     /* 获取日志级别 */
     level_str = get_log_level_string(level);
     
-    /* 格式化消息 */
-    va_start(args, format);
-    vsnprintf(log_buffer, sizeof(log_buffer), format, args);
-    va_end(args);
-    
-    /* 写入日志文件 */
-    pthread_mutex_lock(&log_file_mutex);
+    /* 写入日志文件（只在必要时加锁） */
     if (g_intercept_state.log_file) {
-        fprintf(g_intercept_state.log_file, "[%s] [%s] [PID:%d] %s\n",
-                time_str, level_str, getpid(), log_buffer);
-        fflush(g_intercept_state.log_file);
+        pthread_mutex_lock(&log_file_mutex);
+        if (g_intercept_state.log_file) {
+            fprintf(g_intercept_state.log_file, "[%s] [%s] [PID:%d] %s\n",
+                    time_str, level_str, getpid(), local_buffer);
+            /* 减少fflush调用，只在关键级别或配置要求时刷新 */
+            if (level >= LOG_LEVEL_ERROR || g_intercept_state.config.log_level <= LOG_LEVEL_DEBUG) {
+                fflush(g_intercept_state.log_file);
+            }
+        }
+        pthread_mutex_unlock(&log_file_mutex);
     }
-    pthread_mutex_unlock(&log_file_mutex);
 }

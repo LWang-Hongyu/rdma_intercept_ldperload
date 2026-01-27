@@ -30,7 +30,13 @@ static void adjust_local_qp_limit(void)
     uint32_t max_global = collector_get_max_global_qp();
     
     // 计算全局QP使用率
-    float global_usage = (float)global_count / max_global;
+    float global_usage = 0.0;
+    if (max_global > 0) {
+        global_usage = (float)global_count / max_global;
+    } else {
+        // 全局QP上限未设置，使用默认值
+        global_usage = 0.0;
+    }
     
     // 根据全局使用率调整本地限制
     if (global_usage < 0.3) {
@@ -60,21 +66,28 @@ bool check_dynamic_qp_policy(struct ibv_pd *pd, struct ibv_qp_init_attr *qp_init
     (void)pd;  // 未使用的参数
     (void)qp_init_attr;  // 未使用的参数
     
+    rdma_intercept_log(LOG_LEVEL_INFO, "开始检查动态QP策略");
+    
     // 调整本地QP限制
     adjust_local_qp_limit();
     
     // 检查全局QP限制
+    rdma_intercept_log(LOG_LEVEL_INFO, "检查全局QP限制");
     if (collector_check_global_qp_limit()) {
+        rdma_intercept_log(LOG_LEVEL_ERROR, "全局QP限制检查失败");
         return false;
     }
     
     // 检查本地QP限制
+    rdma_intercept_log(LOG_LEVEL_INFO, "检查本地QP限制: %u/%u", 
+                     g_intercept_state.qp_count, local_qp_limit);
     if (g_intercept_state.qp_count >= local_qp_limit) {
         rdma_intercept_log(LOG_LEVEL_ERROR, "本地QP限制已达到: %u/%u", 
                          g_intercept_state.qp_count, local_qp_limit);
         return false;
     }
     
+    rdma_intercept_log(LOG_LEVEL_INFO, "动态QP策略检查通过");
     return true;
 }
 

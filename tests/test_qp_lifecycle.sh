@@ -239,4 +239,11 @@ echo "======================================"
 # 清理临时文件
 rm -f test_qp_lifecycle test_qp_lifecycle.c
 
+# 清理环境变量
+unset RDMA_INTERCEPT_ENABLE
+unset RDMA_INTERCEPT_ENABLE_QP_CONTROL
+unset RDMA_INTERCEPT_MAX_GLOBAL_QP
+unset RDMA_INTERCEPT_MAX_QP_PER_PROCESS
+unset LD_PRELOAD
+
 echo "测试完成！"
