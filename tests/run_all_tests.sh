@@ -849,7 +849,7 @@ test_automated() {
     export RDMA_INTERCEPT_ENABLE_QP_CONTROL=1
     export LD_PRELOAD="$INTERCEPT_LIB"
     export RDMA_INTERCEPT_MAX_GLOBAL_QP="$MAX_GLOBAL_QP"
-    export RDMA_INTERCEPT_MAX_QP_PER_PROCESS=5
+    export RDMA_INTERCEPT_MAX_QP_PER_PROCESS=3
     
     # 运行测试程序
     /tmp/test_automated > /tmp/test_output.log 2>&1
