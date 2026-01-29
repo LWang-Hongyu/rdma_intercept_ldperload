@@ -27,21 +27,34 @@ intercept_state_t g_intercept_state = {
         .max_recv_wr_limit = 1024,   /* 默认接收WR限制1024 */
         .allow_rc_qp = true,         /* 默认允许RC类型 */
         .allow_uc_qp = true,         /* 默认允许UC类型 */
-        .allow_ud_qp = true          /* 默认允许UD类型 */
+        .allow_ud_qp = true,         /* 默认允许UD类型 */
+        .allow_rq_qp = true,         /* 默认允许RQ类型 */
+        
+        /* 内存资源管理默认配置 */
+        .enable_mr_control = false,  /* 默认关闭内存控制 */
+        .max_mr_per_process = 1000,  /* 默认每个进程最多1000个MR */
+        .max_memory_per_process = 1024ULL * 1024ULL * 1024ULL * 10ULL  /* 默认每个进程最多10GB内存 */
     },
     .log_file = NULL,
     .log_mutex = PTHREAD_MUTEX_INITIALIZER,
     .qp_count = 0,                  /* 当前进程QP计数 */
-    .qp_list = NULL                 /* QP列表 */
+    .qp_list = NULL,                /* QP列表 */
+    .mr_count = 0,                  /* 当前进程MR计数 */
+    .memory_used = 0,               /* 当前进程内存使用量（字节） */
+    .mr_list = NULL                 /* MR列表 */
 };
 
 /* 函数指针类型定义 */
 typedef struct ibv_qp *(*ibv_create_qp_fn)(struct ibv_pd *, struct ibv_qp_init_attr *);
 typedef struct ibv_qp *(*ibv_create_qp_ex_fn)(struct ibv_context *, struct ibv_qp_init_attr_ex *);
+typedef struct ibv_mr *(*ibv_reg_mr_fn)(struct ibv_pd *, void *, size_t, int);
+typedef int (*ibv_dereg_mr_fn)(struct ibv_mr *);
 
 /* 原始函数指针存储 */
 static ibv_create_qp_fn real_ibv_create_qp = NULL;
 static ibv_create_qp_ex_fn real_ibv_create_qp_ex = NULL;
+static ibv_reg_mr_fn real_ibv_reg_mr = NULL;
+static ibv_dereg_mr_fn real_ibv_dereg_mr = NULL;
 
 /* 延迟初始化相关变量 */
 pthread_once_t init_once = PTHREAD_ONCE_INIT;
@@ -109,12 +122,41 @@ int rdma_intercept_init(void) {
     real_ibv_create_qp_ex = (ibv_create_qp_ex_fn)dlsym(libibverbs, "ibv_create_qp_ex");
     dlerror(); // 忽略错误信息
     
+    // 获取原始ibv_reg_mr函数地址
+    dlerror(); // 清除之前的错误
+    real_ibv_reg_mr = (ibv_reg_mr_fn)dlsym(libibverbs, "ibv_reg_mr");
+    
+    if (!real_ibv_reg_mr) {
+        fprintf(stderr, "[RDMA_INTERCEPT] Failed to find ibv_reg_mr in libibverbs: %s\n", dlerror());
+        dlclose(libibverbs);
+        fclose(g_intercept_state.log_file);
+        errno = ENOSYS;
+        return -1;
+    }
+    
+    // 获取原始ibv_dereg_mr函数地址
+    dlerror(); // 清除之前的错误
+    real_ibv_dereg_mr = (ibv_dereg_mr_fn)dlsym(libibverbs, "ibv_dereg_mr");
+    
+    if (!real_ibv_dereg_mr) {
+        fprintf(stderr, "[RDMA_INTERCEPT] Failed to find ibv_dereg_mr in libibverbs: %s\n", dlerror());
+        dlclose(libibverbs);
+        fclose(g_intercept_state.log_file);
+        errno = ENOSYS;
+        return -1;
+    }
+    
+    fprintf(stderr, "[RDMA_INTERCEPT] Found ibv_reg_mr in libibverbs at: %p\n", real_ibv_reg_mr);
+    fprintf(stderr, "[RDMA_INTERCEPT] Found ibv_dereg_mr in libibverbs at: %p\n", real_ibv_dereg_mr);
+    
     // 关闭libibverbs句柄
     dlclose(libibverbs);
 
     fprintf(g_intercept_state.log_file, "[INFO] RDMA Intercept initialized successfully\n");
     fprintf(g_intercept_state.log_file, "[INFO] ibv_create_qp: %p\n", real_ibv_create_qp);
     fprintf(g_intercept_state.log_file, "[INFO] ibv_create_qp_ex: %p\n", real_ibv_create_qp_ex);
+    fprintf(g_intercept_state.log_file, "[INFO] ibv_reg_mr: %p\n", real_ibv_reg_mr);
+    fprintf(g_intercept_state.log_file, "[INFO] ibv_dereg_mr: %p\n", real_ibv_dereg_mr);
 
     g_intercept_state.initialized = true;
     return 0;

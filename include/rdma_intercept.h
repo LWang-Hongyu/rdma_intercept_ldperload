@@ -45,6 +45,11 @@ typedef struct {
     bool allow_uc_qp;             /* 允许UC类型QP */
     bool allow_ud_qp;             /* 允许UD类型QP */
     bool allow_rq_qp;             /* 允许RQ类型QP */
+    
+    /* 内存资源管理配置 */
+    bool enable_mr_control;       /* 启用内存区域控制 */
+    uint32_t max_mr_per_process;  /* 每个进程的最大MR数量 */
+    uint64_t max_memory_per_process; /* 每个进程的最大内存使用量（字节） */
 } intercept_config_t;
 
 /* QP创建信息 */
@@ -77,6 +82,11 @@ typedef struct {
     /* 资源管理和性能隔离状态 */
     uint32_t qp_count;          /* 当前进程QP计数 */
     void *qp_list;              /* QP列表（预留） */
+    
+    /* 内存资源管理状态 */
+    uint32_t mr_count;          /* 当前进程MR计数 */
+    uint64_t memory_used;       /* 当前进程内存使用量（字节） */
+    void *mr_list;              /* MR列表（预留） */
 } intercept_state_t;
 
 /* 全局状态 */
@@ -106,6 +116,12 @@ bool rdma_intercept_is_enabled(void);
 /* 被拦截的RDMA函数声明 */
 struct ibv_qp *ibv_create_qp_intercept(struct ibv_pd *pd, struct ibv_qp_init_attr *qp_init_attr);
 struct ibv_qp *ibv_create_qp_ex_intercept(struct ibv_context *context, struct ibv_qp_init_attr_ex *qp_init_attr_ex);
+struct ibv_mr *ibv_reg_mr_intercept(struct ibv_pd *pd, void *addr, size_t length, int access);
+int ibv_dereg_mr_intercept(struct ibv_mr *mr);
+
+/* collector客户端函数声明 */
+bool collector_send_mr_create_event(size_t length);
+void collector_send_mr_destroy_event(size_t length);
 
 #ifdef __cplusplus
 }

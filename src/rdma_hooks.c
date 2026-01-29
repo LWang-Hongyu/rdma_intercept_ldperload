@@ -16,6 +16,9 @@ uint32_t collector_get_max_global_qp(void);
 bool collector_check_global_qp_limit(void);
 bool collector_send_qp_create_event(void);
 void collector_send_qp_destroy_event(void);
+bool collector_send_mr_create_event(size_t length);
+void collector_send_mr_destroy_event(size_t length);
+bool collector_check_global_memory_limit(size_t requested_size);
 bool check_dynamic_qp_policy(struct ibv_pd *pd, struct ibv_qp_init_attr *qp_init_attr);
 void init_dynamic_policy(void);
 void collector_cleanup(void);
@@ -29,6 +32,7 @@ typedef int (*ibv_destroy_cq_fn)(struct ibv_cq *);
 typedef struct ibv_pd *(*ibv_alloc_pd_fn)(struct ibv_context *);
 typedef int (*ibv_dealloc_pd_fn)(struct ibv_pd *);
 typedef int (*ibv_dereg_mr_fn)(struct ibv_mr *);
+typedef struct ibv_mr *(*ibv_reg_mr_fn)(struct ibv_pd *, void *, size_t, int);
 typedef struct ibv_mr *(*ibv_create_mr_fn)(struct ibv_pd *, void *);
 typedef int (*ibv_destroy_mr_fn)(struct ibv_mr *);
 typedef struct ibv_srq *(*ibv_create_srq_fn)(struct ibv_pd *, struct ibv_srq_init_attr *);
@@ -48,6 +52,7 @@ static ibv_destroy_cq_fn real_ibv_destroy_cq = NULL;
 static ibv_alloc_pd_fn real_ibv_alloc_pd = NULL;
 static ibv_dealloc_pd_fn real_ibv_dealloc_pd = NULL;
 static ibv_dereg_mr_fn real_ibv_dereg_mr = NULL;
+static ibv_reg_mr_fn real_ibv_reg_mr = NULL;
 static ibv_create_mr_fn real_ibv_create_mr = NULL;
 static ibv_destroy_mr_fn real_ibv_destroy_mr = NULL;
 static ibv_create_srq_fn real_ibv_create_srq = NULL;
@@ -84,6 +89,7 @@ static void init_function_pointers(void) {
     real_ibv_alloc_pd = (ibv_alloc_pd_fn)dlsym(libibverbs, "ibv_alloc_pd");
     real_ibv_dealloc_pd = (ibv_dealloc_pd_fn)dlsym(libibverbs, "ibv_dealloc_pd");
     real_ibv_dereg_mr = (ibv_dereg_mr_fn)dlsym(libibverbs, "ibv_dereg_mr");
+    real_ibv_reg_mr = (ibv_reg_mr_fn)dlsym(libibverbs, "ibv_reg_mr");
     real_ibv_create_mr = (ibv_create_mr_fn)dlsym(libibverbs, "ibv_create_mr");
     real_ibv_destroy_mr = (ibv_destroy_mr_fn)dlsym(libibverbs, "ibv_destroy_mr");
     
@@ -627,13 +633,29 @@ int ibv_dereg_mr(struct ibv_mr *mr) {
         rdma_intercept_log(LOG_LEVEL_DEBUG, "Intercepting ibv_dereg_mr: MR=%p", mr);
     }
 
+    /* 保存MR长度用于后续更新内存使用量 */
+    size_t mr_length = mr ? mr->length : 0;
+
     /* 调用原始函数 */
     int result = real_ibv_dereg_mr(mr);
     
     if (result == 0) {
+        /* 发送MR销毁事件 */
+        collector_send_mr_destroy_event(mr_length);
+        
+        /* 更新内存资源状态 */
+        if (g_intercept_state.mr_count > 0) {
+            g_intercept_state.mr_count--;
+        }
+        if (mr_length > 0 && g_intercept_state.memory_used >= mr_length) {
+            g_intercept_state.memory_used -= mr_length;
+        }
+        
         /* 只在信息级别及以下记录成功信息 */
         if (g_intercept_state.config.log_level <= LOG_LEVEL_INFO) {
-            rdma_intercept_log(LOG_LEVEL_INFO, "MR deregistered successfully: %p", mr);
+            rdma_intercept_log(LOG_LEVEL_INFO, "MR deregistered successfully: %p, length=%zu (current count: %d, memory used: %llu)", 
+                             mr, mr_length, g_intercept_state.mr_count, 
+                             (unsigned long long)g_intercept_state.memory_used);
         }
     } else {
         /* 错误信息总是记录 */
@@ -813,3 +835,76 @@ int ibv_dealloc_pd(struct ibv_pd *pd) {
 
     return result;
 }
+
+/* 被拦截的ibv_reg_mr函数 - 使用不同的名称避免宏冲突 */
+struct ibv_mr *__real_ibv_reg_mr(struct ibv_pd *pd, void *addr, size_t length, int access) {
+    pthread_once(&hooks_init_once, init_function_pointers);
+    
+    /* 快速路径：如果拦截未启用或函数指针无效，直接调用原始函数 */
+    if (!rdma_intercept_is_enabled() || !real_ibv_reg_mr) {
+        if (real_ibv_reg_mr) {
+            return real_ibv_reg_mr(pd, addr, length, access);
+        }
+        errno = ENOSYS;
+        return NULL;
+    }
+
+    /* 只在调试级别记录拦截信息 */
+    if (g_intercept_state.config.log_level <= LOG_LEVEL_DEBUG) {
+        rdma_intercept_log(LOG_LEVEL_DEBUG, "Intercepting ibv_reg_mr: PD=%p, addr=%p, length=%zu", pd, addr, length);
+    }
+
+    /* 检查内存资源限制 */
+    if (g_intercept_state.config.enable_mr_control) {
+        if (g_intercept_state.mr_count >= g_intercept_state.config.max_mr_per_process) {
+            rdma_intercept_log(LOG_LEVEL_ERROR, "MR registration denied: max MR per process (%d) reached", 
+                             g_intercept_state.config.max_mr_per_process);
+            errno = EPERM;
+            return NULL;
+        }
+        
+        if (g_intercept_state.memory_used + length > g_intercept_state.config.max_memory_per_process) {
+            rdma_intercept_log(LOG_LEVEL_ERROR, "MR registration denied: max memory per process (%llu) exceeded (current: %llu, requested: %zu)", 
+                             (unsigned long long)g_intercept_state.config.max_memory_per_process,
+                             (unsigned long long)g_intercept_state.memory_used, length);
+            errno = EPERM;
+            return NULL;
+        }
+    }
+
+    /* 检查全局内存限制 */
+    if (collector_check_global_memory_limit(length)) {
+        rdma_intercept_log(LOG_LEVEL_ERROR, "MR registration denied: global memory limit reached");
+        errno = EPERM;
+        return NULL;
+    }
+
+    /* 调用原始函数 */
+    struct ibv_mr *mr = real_ibv_reg_mr(pd, addr, length, access);
+    
+    if (mr) {
+        /* 发送MR创建事件 */
+        collector_send_mr_create_event(length);
+        
+        /* 更新内存资源状态 */
+        g_intercept_state.mr_count++;
+        g_intercept_state.memory_used += length;
+        
+        /* 只在信息级别及以下记录成功信息 */
+        if (g_intercept_state.config.log_level <= LOG_LEVEL_INFO) {
+            rdma_intercept_log(LOG_LEVEL_INFO, "MR registered successfully: %p, length=%zu (current count: %d, memory used: %llu)", 
+                             mr, length, g_intercept_state.mr_count, 
+                             (unsigned long long)g_intercept_state.memory_used);
+        }
+    } else {
+        /* 错误信息总是记录 */
+        rdma_intercept_log(LOG_LEVEL_ERROR, "Failed to register MR: %s", strerror(errno));
+    }
+
+    return mr;
+}
+
+/* 使用汇编代码实现ibv_reg_mr的拦截 */
+__asm__(".globl ibv_reg_mr\n"
+        "ibv_reg_mr:\n"
+        "jmp __real_ibv_reg_mr\n");

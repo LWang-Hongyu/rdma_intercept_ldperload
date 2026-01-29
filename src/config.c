@@ -293,6 +293,30 @@ static void load_config_from_env(intercept_config_t *config) {
     if (env_val) {
         parse_bool(env_val, &config->allow_ud_qp);
     }
+    
+    /* 内存控制相关配置 */
+    env_val = getenv("RDMA_INTERCEPT_ENABLE_MR_CONTROL");
+    if (env_val) {
+        parse_bool(env_val, &config->enable_mr_control);
+    }
+    
+    /* 最大MR数量 */
+    env_val = getenv("RDMA_INTERCEPT_MAX_MR_PER_PROCESS");
+    if (env_val) {
+        long val = strtol(env_val, NULL, 10);
+        if (val > 0 && val <= UINT32_MAX) {
+            config->max_mr_per_process = (uint32_t)val;
+        }
+    }
+    
+    /* 最大内存使用量 */
+    env_val = getenv("RDMA_INTERCEPT_MAX_MEMORY_PER_PROCESS");
+    if (env_val) {
+        unsigned long long val = strtoull(env_val, NULL, 10);
+        if (val > 0) {
+            config->max_memory_per_process = val;
+        }
+    }
 }
 
 /* 从文件加载配置 */

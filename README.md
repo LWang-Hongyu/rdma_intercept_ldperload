@@ -4,18 +4,20 @@
 基于LD_PRELOAD技术和eBPF技术实现了RDMA QP创建拦截器，能够透明地拦截、记录和控制RDMA资源创建操作，同时提供全局监控能力。
 
 ## 核心功能
-- **函数劫持**: 拦截ibv_create_qp、ibv_destroy_qp等关键RDMA函数
+- **函数劫持**: 拦截ibv_create_qp、ibv_destroy_qp、ibv_reg_mr、ibv_dereg_mr等关键RDMA函数
 - **配置管理**: 支持通过环境变量控制拦截行为
-- **日志记录**: 详细记录QP创建信息和操作状态
+- **日志记录**: 详细记录QP创建和内存注册信息及操作状态
 - **线程安全**: 使用互斥锁确保多线程环境下的安全操作
 - **eBPF监控**: 全局、无侵入地监控所有进程的RDMA资源使用情况
 - **数据收集服务**: 收集和分析eBPF监控数据，提供查询接口
 - **动态策略**: 基于全局资源状况调整控制策略
 - **QP限制控制**: 支持设置全局和每进程的QP创建限制
+- **内存资源控制**: 支持设置全局和每进程的内存使用限制
 
 ## 测试结果
 - ✅ **单元测试**: 99.9%通过率（1036/1037测试通过，主要测试基础组件）
 - ✅ **功能测试**: 真实QP创建拦截测试通过
+- ✅ **内存监控测试**: 内存注册/注销拦截和监控测试通过
 - ✅ **无拦截器运行**: 程序正常运行，RDMA资源创建成功
 - ✅ **拦截功能**: 已修复符号解析问题，拦截器可以正常工作
 - ✅ **数据收集服务测试**: 成功处理客户端连接和请求
@@ -23,6 +25,8 @@
 - ✅ **延迟初始化测试**: 验证了延迟初始化方案的有效性，collector_server不再被拦截
 - ✅ **边界情况测试**: 0个QP创建请求测试通过
 - ✅ **不同QP类型测试**: 成功创建RC、UC、UD类型的QP
+- ✅ **内存限制测试**: 内存数量和大小限制功能测试通过
+- ✅ **全局内存限制测试**: 全局内存使用限制功能测试通过
 - ✅ **自动化测试**: 所有5个场景测试通过
 
 ## 技术问题与解决方案
@@ -91,10 +95,27 @@ export LD_PRELOAD=/home/why/rdma_intercept_ldpreload/build/librdma_intercept.so
 ./your_rdma_application
 ```
 
+## 内存监控控制使用
+```bash
+# 启用内存控制并设置限制
+export RDMA_INTERCEPT_ENABLE=1
+export RDMA_INTERCEPT_ENABLE_MR_CONTROL=1
+export RDMA_INTERCEPT_MAX_MR_PER_PROCESS=100
+export RDMA_INTERCEPT_MAX_MEMORY_PER_PROCESS=52428800  # 50MB
+export RDMA_INTERCEPT_MAX_GLOBAL_MEMORY=104857600  # 100MB
+export LD_PRELOAD=/home/why/rdma_intercept_ldpreload/build/librdma_intercept.so
+
+# 运行RDMA应用
+./your_rdma_application
+```
+
 ## 测试脚本
 ```bash
 # 运行真实QP创建拦截测试
 ./tests/test_real_qp_intercept.sh
+
+# 运行内存注册/注销监控测试
+./tests/test_memory_registration.sh
 ```
 
 ## 项目结构
@@ -114,7 +135,8 @@ rdma_intercept_ldpreload/
 ├── include/               # 头文件
 │   └── rdma_intercept.h
 ├── tests/                 # 测试脚本
-│   └── test_real_qp_intercept.sh # 真实QP创建拦截测试
+│   ├── test_real_qp_intercept.sh # 真实QP创建拦截测试
+│   └── test_memory_registration.sh # 内存注册/注销监控测试
 ├── build/                 # 构建输出
 ├── CMakeLists.txt       # 构建配置
 ├── build_all.sh         # 一键构建脚本
@@ -141,34 +163,37 @@ rdma_intercept_ldpreload/
 - **QP注销监控**: 拦截`ibv_destroy_qp`函数，确保QP计数准确
 - **CQ监控**: 拦截`ibv_create_cq`和`ibv_destroy_cq`函数
 - **PD监控**: 拦截`ibv_alloc_pd`和`ibv_dealloc_pd`函数
+- **内存注册监控**: 拦截`ibv_reg_mr`函数，监控内存注册情况
+- **内存注销监控**: 拦截`ibv_dereg_mr`函数，确保内存计数准确
 
 ### 📋 计划扩展的RDMA控制原语
-1. **内存注册/注销**
-   - `ibv_reg_mr` / `ibv_dereg_mr`
-   - 监控内存资源使用情况
-
-2. **SRQ管理**
+1. **SRQ管理**
    - `ibv_create_srq` / `ibv_destroy_srq`
    - 支持SRQ数量控制
 
-3. **AH管理**
+2. **AH管理**
    - `ibv_create_ah` / `ibv_destroy_ah`
    - 监控地址句柄使用情况
 
-4. **CQ事件处理**
+3. **CQ事件处理**
    - `ibv_get_cq_event` / `ibv_ack_cq_events`
    - 监控CQ事件处理性能
 
-5. **QP状态转换**
+4. **QP状态转换**
    - `ibv_modify_qp`
    - 监控QP状态变化
 
-6. **多端口支持**
+5. **多端口支持**
    - 扩展到多RDMA端口环境
    - 支持端口级别的资源控制
+
+6. **频率限制功能**
+   - 实现销毁QP和注销内存等操作的频率限制
+   - 防止恶意用户频繁操作导致系统波动
 
 ### 🎯 扩展目标
 - **全面监控**: 覆盖所有关键RDMA原语
 - **精细控制**: 支持更细粒度的资源管理
 - **性能优化**: 提供性能分析和优化建议
 - **可靠性提升**: 增强错误处理和故障恢复能力
+- **安全增强**: 添加操作频率限制，防止恶意使用

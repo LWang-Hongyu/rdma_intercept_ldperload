@@ -36,6 +36,12 @@ static uint32_t max_global_qp = 10; // 默认全局QP上限
 static pthread_mutex_t qp_count_mutex = PTHREAD_MUTEX_INITIALIZER;
 static int qp_counts_map_fd = -1; // eBPF映射文件描述符
 
+// 内存资源全局变量
+static uint32_t global_mr_count = 0;
+static uint64_t global_memory_used = 0;
+static uint64_t max_global_memory = 1024ULL * 1024ULL * 1024ULL * 10; // 默认全局内存上限10GB
+static pthread_mutex_t memory_count_mutex = PTHREAD_MUTEX_INITIALIZER;
+
 // 获取全局QP上限
 static void update_max_global_qp(void) {
     // 从环境变量读取全局QP上限
@@ -47,6 +53,21 @@ static void update_max_global_qp(void) {
             max_global_qp = new_max;
             pthread_mutex_unlock(&qp_count_mutex);
             printf("更新全局QP上限为: %u\n", new_max);
+        }
+    }
+}
+
+// 获取全局内存上限
+static void update_max_global_memory(void) {
+    // 从环境变量读取全局内存上限
+    const char *max_memory_str = getenv("RDMA_INTERCEPT_MAX_GLOBAL_MEMORY");
+    if (max_memory_str) {
+        uint64_t new_max = atoll(max_memory_str);
+        if (new_max > 0) {
+            pthread_mutex_lock(&memory_count_mutex);
+            max_global_memory = new_max;
+            pthread_mutex_unlock(&memory_count_mutex);
+            printf("更新全局内存上限为: %llu bytes\n", (unsigned long long)new_max);
         }
     }
 }
@@ -93,8 +114,15 @@ static int initialize_service(void)
     // 初始化全局QP计数为0
     global_qp_count = 0;
     
+    // 初始化全局内存计数为0
+    global_mr_count = 0;
+    global_memory_used = 0;
+    
     // 从环境变量读取全局QP上限
     update_max_global_qp();
+    
+    // 从环境变量读取全局内存上限
+    update_max_global_memory();
     
     // 获取eBPF映射文件描述符
     qp_counts_map_fd = get_bpf_map_fd("/sys/fs/bpf/qp_counts");
@@ -103,13 +131,13 @@ static int initialize_service(void)
         // 创建一个新的eBPF映射
         qp_counts_map_fd = create_bpf_map();
         if (qp_counts_map_fd < 0) {
-            fprintf(stderr, "创建eBPF映射失败，将使用模拟的QP计数\n");
+            fprintf(stderr, "创建eBPF映射失败，将使用基于内存的集中式计数\n");
         } else {
             printf("创建eBPF映射成功，文件描述符: %d\n", qp_counts_map_fd);
         }
     }
     
-    printf("数据收集服务初始化成功，全局QP计数重置为0\n");
+    printf("数据收集服务初始化成功，全局QP计数重置为0，全局内存计数重置为0\n");
     return 0;
 }
 
@@ -214,14 +242,23 @@ static void main_loop(void)
                 // 处理GET_STATS请求
                 if (strcmp(buffer, "GET_STATS") == 0) {
                     // 构建响应
-                    char response[256];
+                    char response[512];
                     pthread_mutex_lock(&qp_count_mutex);
-                    uint32_t current_count = global_qp_count;
-                    uint32_t current_max = max_global_qp;
+                    uint32_t current_qp_count = global_qp_count;
+                    uint32_t current_max_qp = max_global_qp;
                     pthread_mutex_unlock(&qp_count_mutex);
                     
-                    snprintf(response, sizeof(response), "Total QP: %u\nMax QP: %u\n", 
-                             current_count, current_max);
+                    pthread_mutex_lock(&memory_count_mutex);
+                    uint32_t current_mr_count = global_mr_count;
+                    uint64_t current_memory_used = global_memory_used;
+                    uint64_t current_max_memory = max_global_memory;
+                    pthread_mutex_unlock(&memory_count_mutex);
+                    
+                    snprintf(response, sizeof(response), "Total QP: %u\nMax QP: %u\n" 
+                             "Total MR: %u\nTotal Memory Used: %llu bytes\nMax Memory: %llu bytes\n", 
+                             current_qp_count, current_max_qp,
+                             current_mr_count, (unsigned long long)current_memory_used, 
+                             (unsigned long long)current_max_memory);
 
                     // 发送响应
                     n = write(client_fd, response, strlen(response));
@@ -265,6 +302,99 @@ static void main_loop(void)
                     if (n < 0) {
                         fprintf(stderr, "发送响应失败: %d\n", errno);
                     }
+                } else if (strncmp(buffer, "MR_CREATE ", 10) == 0) {
+                    // 处理MR创建事件
+                    size_t length = 0;
+                    if (sscanf(buffer + 10, "%zu", &length) == 1) {
+                        pthread_mutex_lock(&memory_count_mutex);
+                        if (global_memory_used + length > max_global_memory) {
+                            // 达到内存上限，拒绝创建
+                            pthread_mutex_unlock(&memory_count_mutex);
+                            const char *error_response = "Error: Memory limit reached\n";
+                            n = write(client_fd, error_response, strlen(error_response));
+                            if (n < 0) {
+                                fprintf(stderr, "发送响应失败: %d\n", errno);
+                            }
+                        } else {
+                            // 未达到内存上限，允许创建
+                            global_mr_count++;
+                            global_memory_used += length;
+                            pthread_mutex_unlock(&memory_count_mutex);
+                            
+                            // 发送成功响应
+                            const char *success_response = "Success: MR created\n";
+                            n = write(client_fd, success_response, strlen(success_response));
+                            if (n < 0) {
+                                fprintf(stderr, "发送响应失败: %d\n", errno);
+                            }
+                        }
+                    } else {
+                        // 解析失败
+                        const char *error_response = "Error: Invalid MR_CREATE request\n";
+                        n = write(client_fd, error_response, strlen(error_response));
+                        if (n < 0) {
+                            fprintf(stderr, "发送响应失败: %d\n", errno);
+                        }
+                    }
+                } else if (strncmp(buffer, "CHECK_MEMORY ", 13) == 0) {
+                    // 处理内存检查事件
+                    size_t length = 0;
+                    if (sscanf(buffer + 13, "%zu", &length) == 1) {
+                        pthread_mutex_lock(&memory_count_mutex);
+                        if (global_memory_used + length > max_global_memory) {
+                            // 达到内存上限，拒绝创建
+                            pthread_mutex_unlock(&memory_count_mutex);
+                            const char *error_response = "Error: Memory limit reached\n";
+                            n = write(client_fd, error_response, strlen(error_response));
+                            if (n < 0) {
+                                fprintf(stderr, "发送响应失败: %d\n", errno);
+                            }
+                        } else {
+                            // 未达到内存上限，允许创建
+                            pthread_mutex_unlock(&memory_count_mutex);
+                            
+                            // 发送成功响应
+                            const char *success_response = "Success: Memory check passed\n";
+                            n = write(client_fd, success_response, strlen(success_response));
+                            if (n < 0) {
+                                fprintf(stderr, "发送响应失败: %d\n", errno);
+                            }
+                        }
+                    } else {
+                        // 解析失败
+                        const char *error_response = "Error: Invalid CHECK_MEMORY request\n";
+                        n = write(client_fd, error_response, strlen(error_response));
+                        if (n < 0) {
+                            fprintf(stderr, "发送响应失败: %d\n", errno);
+                        }
+                    }
+                } else if (strncmp(buffer, "MR_DESTROY ", 11) == 0) {
+                    // 处理MR销毁事件
+                    size_t length = 0;
+                    if (sscanf(buffer + 11, "%zu", &length) == 1) {
+                        pthread_mutex_lock(&memory_count_mutex);
+                        if (global_mr_count > 0) {
+                            global_mr_count--;
+                        }
+                        if (length > 0 && global_memory_used >= length) {
+                            global_memory_used -= length;
+                        }
+                        pthread_mutex_unlock(&memory_count_mutex);
+                        
+                        // 发送成功响应
+                        const char *success_response = "Success: MR destroyed\n";
+                        n = write(client_fd, success_response, strlen(success_response));
+                        if (n < 0) {
+                            fprintf(stderr, "发送响应失败: %d\n", errno);
+                        }
+                    } else {
+                        // 解析失败
+                        const char *error_response = "Error: Invalid MR_DESTROY request\n";
+                        n = write(client_fd, error_response, strlen(error_response));
+                        if (n < 0) {
+                            fprintf(stderr, "发送响应失败: %d\n", errno);
+                        }
+                    }
                 } else {
                     // 处理未知请求
                     const char *error_response = "Error: Unknown request\n";
@@ -294,6 +424,7 @@ static void cleanup(void)
     }
 
     pthread_mutex_destroy(&qp_count_mutex);
+    pthread_mutex_destroy(&memory_count_mutex);
 }
 
 // 主函数
@@ -309,6 +440,16 @@ int main(int argc __attribute__((unused)), char *argv[] __attribute__((unused)))
         printf("从环境变量读取全局QP上限: %s -> %u\n", max_qp_str, env_max_global_qp);
     } else {
         printf("未找到RDMA_INTERCEPT_MAX_GLOBAL_QP环境变量\n");
+    }
+
+    // 在变成守护进程之前，先读取环境变量中的全局内存上限
+    const char *max_memory_str = getenv("RDMA_INTERCEPT_MAX_GLOBAL_MEMORY");
+    uint64_t env_max_global_memory = 0;
+    if (max_memory_str) {
+        env_max_global_memory = atoll(max_memory_str);
+        printf("从环境变量读取全局内存上限: %s -> %llu bytes\n", max_memory_str, (unsigned long long)env_max_global_memory);
+    } else {
+        printf("未找到RDMA_INTERCEPT_MAX_GLOBAL_MEMORY环境变量\n");
     }
 
     // 将进程变成守护进程
@@ -334,6 +475,14 @@ int main(int argc __attribute__((unused)), char *argv[] __attribute__((unused)))
         max_global_qp = env_max_global_qp;
         pthread_mutex_unlock(&qp_count_mutex);
         printf("从环境变量更新全局QP上限为: %u\n", env_max_global_qp);
+    }
+
+    // 使用之前读取的环境变量值更新全局内存上限
+    if (env_max_global_memory > 0) {
+        pthread_mutex_lock(&memory_count_mutex);
+        max_global_memory = env_max_global_memory;
+        pthread_mutex_unlock(&memory_count_mutex);
+        printf("从环境变量更新全局内存上限为: %llu bytes\n", (unsigned long long)env_max_global_memory);
     }
 
     // 启动服务器

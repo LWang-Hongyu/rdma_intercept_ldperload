@@ -161,6 +161,8 @@ bool collector_send_qp_create_event(void)
     return success;
 }
 
+
+
 // 发送QP销毁事件
 void collector_send_qp_destroy_event(void)
 {
@@ -239,6 +241,181 @@ bool collector_check_global_qp_limit(void)
     // 否则，拒绝创建QP
     rdma_intercept_log(LOG_LEVEL_ERROR, "QP creation denied: global QP limit reached: %u/%u", global_count, max_global);
     return true;
+}
+
+// 发送内存注册事件
+bool collector_send_mr_create_event(size_t length)
+{
+    int temp_fd = -1;
+    struct sockaddr_un addr;
+
+    // 创建临时socket连接
+    temp_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (temp_fd < 0) {
+        rdma_intercept_log(LOG_LEVEL_ERROR, "无法创建collector socket: %d", errno);
+        return false;
+    }
+
+    // 准备地址
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    strncpy(addr.sun_path, "/tmp/rdma_collector.sock", sizeof(addr.sun_path) - 1);
+
+    // 连接到服务
+    int err = connect(temp_fd, (struct sockaddr *)&addr, sizeof(addr));
+    if (err < 0) {
+        rdma_intercept_log(LOG_LEVEL_WARN, "无法连接到数据收集服务: %d", errno);
+        close(temp_fd);
+        return false;
+    }
+
+    // 构建MR_CREATE请求
+    char request[64];
+    snprintf(request, sizeof(request), "MR_CREATE %zu", length);
+
+    // 发送MR_CREATE请求
+    err = write(temp_fd, request, strlen(request));
+    if (err < 0) {
+        rdma_intercept_log(LOG_LEVEL_ERROR, "无法发送MR_CREATE请求: %d", errno);
+        close(temp_fd);
+        return false;
+    }
+
+    // 读取响应
+    char buffer[64];
+    err = read(temp_fd, buffer, sizeof(buffer) - 1);
+    if (err < 0) {
+        rdma_intercept_log(LOG_LEVEL_ERROR, "无法读取MR_CREATE响应: %d", errno);
+        close(temp_fd);
+        return false;
+    }
+
+    buffer[err] = '\0';
+
+    // 检查响应
+    bool success = (strstr(buffer, "Success") != NULL);
+    if (!success) {
+        rdma_intercept_log(LOG_LEVEL_ERROR, "MR_CREATE请求被拒绝: %s", buffer);
+    }
+
+    // 关闭临时连接
+    close(temp_fd);
+
+    return success;
+}
+
+// 发送内存注销事件
+void collector_send_mr_destroy_event(size_t length)
+{
+    int temp_fd = -1;
+    struct sockaddr_un addr;
+
+    // 创建临时socket连接
+    temp_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (temp_fd < 0) {
+        rdma_intercept_log(LOG_LEVEL_ERROR, "无法创建collector socket: %d", errno);
+        return;
+    }
+
+    // 准备地址
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    strncpy(addr.sun_path, "/tmp/rdma_collector.sock", sizeof(addr.sun_path) - 1);
+
+    // 连接到服务
+    int err = connect(temp_fd, (struct sockaddr *)&addr, sizeof(addr));
+    if (err < 0) {
+        rdma_intercept_log(LOG_LEVEL_WARN, "无法连接到数据收集服务: %d", errno);
+        close(temp_fd);
+        return;
+    }
+
+    // 构建MR_DESTROY请求
+    char request[64];
+    snprintf(request, sizeof(request), "MR_DESTROY %zu", length);
+
+    // 发送MR_DESTROY请求
+    err = write(temp_fd, request, strlen(request));
+    if (err < 0) {
+        rdma_intercept_log(LOG_LEVEL_ERROR, "无法发送MR_DESTROY请求: %d", errno);
+        close(temp_fd);
+        return;
+    }
+
+    // 读取响应
+    char buffer[64];
+    err = read(temp_fd, buffer, sizeof(buffer) - 1);
+    if (err < 0) {
+        rdma_intercept_log(LOG_LEVEL_ERROR, "无法读取MR_DESTROY响应: %d", errno);
+        close(temp_fd);
+        return;
+    }
+
+    // 关闭临时连接
+    close(temp_fd);
+}
+
+// 检查全局内存使用是否达到上限
+bool collector_check_global_memory_limit(size_t requested_size)
+{
+    rdma_intercept_log(LOG_LEVEL_INFO, "开始检查全局内存限制，请求大小: %zu", requested_size);
+    
+    int temp_fd = -1;
+    struct sockaddr_un addr;
+
+    // 创建临时socket连接
+    temp_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (temp_fd < 0) {
+        rdma_intercept_log(LOG_LEVEL_ERROR, "无法创建collector socket: %d", errno);
+        return false;
+    }
+
+    // 准备地址
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    strncpy(addr.sun_path, "/tmp/rdma_collector.sock", sizeof(addr.sun_path) - 1);
+
+    // 连接到服务
+    int err = connect(temp_fd, (struct sockaddr *)&addr, sizeof(addr));
+    if (err < 0) {
+        rdma_intercept_log(LOG_LEVEL_WARN, "无法连接到数据收集服务: %d", errno);
+        close(temp_fd);
+        return false;
+    }
+
+    // 构建CHECK_MEMORY请求
+    char request[64];
+    snprintf(request, sizeof(request), "CHECK_MEMORY %zu", requested_size);
+
+    // 发送CHECK_MEMORY请求
+    err = write(temp_fd, request, strlen(request));
+    if (err < 0) {
+        rdma_intercept_log(LOG_LEVEL_ERROR, "无法发送CHECK_MEMORY请求: %d", errno);
+        close(temp_fd);
+        return false;
+    }
+
+    // 读取响应
+    char buffer[64];
+    err = read(temp_fd, buffer, sizeof(buffer) - 1);
+    if (err < 0) {
+        rdma_intercept_log(LOG_LEVEL_ERROR, "无法读取CHECK_MEMORY响应: %d", errno);
+        close(temp_fd);
+        return false;
+    }
+
+    buffer[err] = '\0';
+
+    // 检查响应
+    bool success = (strstr(buffer, "Success") != NULL);
+    if (!success) {
+        rdma_intercept_log(LOG_LEVEL_ERROR, "内存注册请求被拒绝: %s", buffer);
+    }
+
+    // 关闭临时连接
+    close(temp_fd);
+
+    return !success; // 返回true表示达到限制，拒绝注册
 }
 
 
