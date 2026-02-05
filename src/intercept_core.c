@@ -40,6 +40,7 @@ intercept_state_t g_intercept_state = {
     },
     .log_file = NULL,
     .log_mutex = PTHREAD_MUTEX_INITIALIZER,
+    .resource_mutex = PTHREAD_MUTEX_INITIALIZER,
     .qp_count = 0,                  /* 当前进程QP计数 */
     .qp_list = NULL,                /* QP列表 */
     .mr_count = 0,                  /* 当前进程MR计数 */

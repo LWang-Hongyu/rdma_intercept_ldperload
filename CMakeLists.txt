@@ -35,6 +35,8 @@ set(INTERCEPT_SOURCES
     src/config.c
     src/collector_client.c
     src/dynamic_policy.c
+    src/shm/shared_memory.c
+    src/ebpf/ebpf_monitor_shm.c
 )
 
 
@@ -65,6 +67,26 @@ target_link_libraries(test_global_limit
     dl
 )
 
+# 共享内存版本测试程序
+add_executable(test_shm_version tests/test_shm_version.c)
+target_link_libraries(test_shm_version
+    ibverbs
+    ${CMAKE_THREAD_LIBS_INIT}
+    rt
+)
+
+# 基于共享内存的数据收集服务
+add_executable(collector_server_shm src/collector_server_shm.c)
+target_link_libraries(collector_server_shm 
+    shared_memory
+    ebpf_monitor_shm
+    ${CMAKE_THREAD_LIBS_INIT}
+    bpf
+    elf
+    z
+    rt
+)
+
 # 主拦截库
 add_library(rdma_intercept SHARED ${INTERCEPT_SOURCES})
 target_link_libraries(rdma_intercept 
@@ -72,7 +94,8 @@ target_link_libraries(rdma_intercept
     rdmacm
     ${CMAKE_THREAD_LIBS_INIT}
     dl
-    ebpf_monitor
+    ebpf_monitor_shm
+    shared_memory
     bpf
     elf
     z
@@ -87,9 +110,25 @@ target_link_libraries(collector_server
     z
 )
 
-# eBPF监控库
+# 共享内存库
+add_library(shared_memory STATIC src/shm/shared_memory.c)
+target_link_libraries(shared_memory 
+    Threads::Threads
+    rt
+)
+
+# eBPF监控库（使用共享内存）
 add_library(ebpf_monitor STATIC src/ebpf/ebpf_monitor.c)
 target_link_libraries(ebpf_monitor 
+    bpf
+    elf
+    z
+)
+
+# eBPF监控库（共享内存版本）
+add_library(ebpf_monitor_shm STATIC src/ebpf/ebpf_monitor_shm.c)
+target_link_libraries(ebpf_monitor_shm 
+    shared_memory
     bpf
     elf
     z
@@ -101,6 +140,16 @@ target_link_libraries(rdma_monitor
     bpf
     elf
     z
+)
+
+# eBPF监控程序（共享内存版本）
+add_executable(ebpf_monitor_shm_exe src/ebpf/ebpf_monitor_shm.c)
+target_link_libraries(ebpf_monitor_shm_exe 
+    shared_memory
+    bpf
+    elf
+    z
+    rt
 )
 
 # 测试程序（已移除，使用tests目录下的脚本）

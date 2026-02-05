@@ -57,7 +57,8 @@ echo "Note: Using local counting mode as eBPF may not be available"
 
 # Interception tests (with interception enabled)
 export RDMA_INTERCEPT_ENABLE=1
-export RDMA_INTERCEPT_MAX_QP=500
+export RDMA_INTERCEPT_ENABLE_QP_CONTROL=1
+export RDMA_INTERCEPT_MAX_QP_PER_PROCESS=500
 export RDMA_INTERCEPT_LOG_LEVEL=1
 
 for qps in "${TEST_QPS[@]}"; do

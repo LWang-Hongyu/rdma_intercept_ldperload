@@ -80,6 +80,7 @@ typedef struct {
     intercept_config_t config;  /* 配置信息 */
     FILE *log_file;            /* 日志文件句柄 */
     pthread_mutex_t log_mutex; /* 日志互斥锁 */
+    pthread_mutex_t resource_mutex; /* 资源计数互斥锁 */
     void *original_functions[MAX_INTERCEPT_FUNCTIONS];  /* 原始函数指针 */
     
     /* 资源管理和性能隔离状态 */

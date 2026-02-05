@@ -8,10 +8,9 @@
 #include <unistd.h>
 #include <errno.h>
 #include <infiniband/verbs.h>
-#include <sys/socket.h>
-#include <sys/un.h>
 #include "rdma_intercept.h"
-#include "ebpf/ebpf_monitor.h"
+#include "ebpf/ebpf_monitor_shm.h"
+#include "shm/shared_memory.h"
 
 // 前向声明
 uint32_t collector_get_global_qp_count(void);
@@ -72,161 +71,44 @@ static pthread_once_t hooks_init_once = PTHREAD_ONCE_INIT;
 /* eBPF初始化状态 */
 static int ebpf_initialized = 0;
 
-/* 通过collector_server获取进程资源使用情况 */
-static int get_process_resources_via_collector(int pid, resource_usage_t *usage)
+/* 通过共享内存获取进程资源使用情况 */
+static int get_process_resources_via_shared_memory(int pid, resource_usage_t *usage)
 {
     if (!usage) {
         return -1;
     }
     
-    char buffer[1024];
-    int n;
-    int temp_fd = -1;
-    struct sockaddr_un addr;
-
-    // 创建临时socket连接
-    temp_fd = socket(AF_UNIX, SOCK_STREAM, 0);
-    if (temp_fd < 0) {
-        fprintf(stderr, "[RDMA_HOOKS] 无法创建collector socket: %d\n", errno);
-        return -1;
-    }
-
-    // 准备地址
-    memset(&addr, 0, sizeof(addr));
-    addr.sun_family = AF_UNIX;
-    strncpy(addr.sun_path, "/tmp/rdma_collector.sock", sizeof(addr.sun_path) - 1);
-
-    // 连接到服务
-    int err = connect(temp_fd, (struct sockaddr *)&addr, sizeof(addr));
-    if (err < 0) {
-        fprintf(stderr, "[RDMA_HOOKS] 无法连接到数据收集服务: %d\n", errno);
-        close(temp_fd);
-        return -1;
-    }
-
-    // 发送请求获取特定进程的统计信息
-    char request[256];
-    snprintf(request, sizeof(request), "GET_PROC_STATS:%d", pid);
-    n = write(temp_fd, request, strlen(request));
-    if (n < 0) {
-        fprintf(stderr, "[RDMA_HOOKS] 无法发送请求: %d\n", errno);
-        close(temp_fd);
-        return -1;
-    }
-
-    // 读取响应
-    n = read(temp_fd, buffer, sizeof(buffer) - 1);
-    if (n < 0) {
-        fprintf(stderr, "[RDMA_HOOKS] 无法读取响应: %d\n", errno);
-        close(temp_fd);
-        return -1;
-    }
-
-    buffer[n] = '\0';
-
-    // 解析响应 - 格式: "QP:1,MR:2,Memory:4096"
-    char *qp_str = strstr(buffer, "QP:");
-    char *mr_str = strstr(buffer, ",MR:");
-    char *mem_str = strstr(buffer, ",Memory:");
-    
-    if (qp_str && mr_str && mem_str) {
-        usage->qp_count = atoi(qp_str + 3);
-        usage->mr_count = atoi(mr_str + 4);
-        usage->memory_used = atol(mem_str + 8);
-        
-        fprintf(stderr, "[RDMA_HOOKS] 从collector获取进程资源使用情况: PID=%d, QP=%d, MR=%d, Memory=%llu\n", 
+    int result = shm_get_process_resources(pid, usage);
+    if (result == 0) {
+        fprintf(stderr, "[RDMA_HOOKS] 从共享内存获取进程资源使用情况: PID=%d, QP=%d, MR=%d, Memory=%llu\n", 
                 pid, usage->qp_count, usage->mr_count, (unsigned long long)usage->memory_used);
-        
-        close(temp_fd);
-        return 0;
     } else {
-        // 如果特定进程信息不可用，返回0值
+        // 如果获取失败，返回0值
         memset(usage, 0, sizeof(resource_usage_t));
-        close(temp_fd);
-        return 0;  // 返回0表示成功，但没有找到进程信息
+        fprintf(stderr, "[RDMA_HOOKS] 无法从共享内存获取进程资源使用情况: PID=%d\n", pid);
     }
+    
+    return result;
 }
 
-/* 通过collector_server获取全局资源使用情况 */
-static int get_global_resources_via_collector(resource_usage_t *usage)
+/* 通过共享内存获取全局资源使用情况 */
+static int get_global_resources_via_shared_memory(resource_usage_t *usage)
 {
     if (!usage) {
         return -1;
     }
     
-    char buffer[1024];
-    int n;
-    int temp_fd = -1;
-    struct sockaddr_un addr;
-
-    // 创建临时socket连接
-    temp_fd = socket(AF_UNIX, SOCK_STREAM, 0);
-    if (temp_fd < 0) {
-        fprintf(stderr, "[RDMA_HOOKS] 无法创建collector socket: %d\n", errno);
-        return -1;
-    }
-
-    // 准备地址
-    memset(&addr, 0, sizeof(addr));
-    addr.sun_family = AF_UNIX;
-    strncpy(addr.sun_path, "/tmp/rdma_collector.sock", sizeof(addr.sun_path) - 1);
-
-    // 连接到服务
-    int err = connect(temp_fd, (struct sockaddr *)&addr, sizeof(addr));
-    if (err < 0) {
-        fprintf(stderr, "[RDMA_HOOKS] 无法连接到数据收集服务: %d\n", errno);
-        close(temp_fd);
-        return -1;
-    }
-
-    // 发送请求获取全局统计信息
-    const char *request = "GET_STATS";
-    n = write(temp_fd, request, strlen(request));
-    if (n < 0) {
-        fprintf(stderr, "[RDMA_HOOKS] 无法发送全局资源请求: %d\n", errno);
-        close(temp_fd);
-        return -1;
-    }
-
-    // 读取响应
-    n = read(temp_fd, buffer, sizeof(buffer) - 1);
-    if (n < 0) {
-        fprintf(stderr, "[RDMA_HOOKS] 无法读取全局资源响应: %d\n", errno);
-        close(temp_fd);
-        return -1;
-    }
-
-    buffer[n] = '\0';
-
-    // 解析响应 - 格式: "Total QP: 5\nMax QP: 10\nTotal MR: 2\nTotal Memory Used: 8192 bytes\nMax Memory: 10737418240 bytes\n"
-    char *qp_str = strstr(buffer, "Total QP: ");
-    char *mr_str = strstr(buffer, "Total MR: ");
-    char *mem_str = strstr(buffer, "Total Memory Used: ");
-    
-    if (qp_str && mr_str && mem_str) {
-        usage->qp_count = atoi(qp_str + 10);  // "Total QP: " is 10 chars
-        usage->mr_count = atoi(mr_str + 10);  // "Total MR: " is 10 chars
-        // Find the memory value before "bytes"
-        char *bytes_pos = strstr(mem_str, " bytes");
-        if (bytes_pos) {
-            *bytes_pos = '\0';  // Temporarily terminate string at "bytes"
-            usage->memory_used = atol(mem_str + 19);  // "Total Memory Used: " is 19 chars
-            *bytes_pos = ' ';   // Restore space
-        } else {
-            usage->memory_used = atol(mem_str + 19);  // Fallback if "bytes" not found
-        }
-        
-        fprintf(stderr, "[RDMA_HOOKS] 从collector获取全局资源使用情况: QP=%d, MR=%d, Memory=%llu\n", 
+    int result = shm_get_global_resources(usage);
+    if (result == 0) {
+        fprintf(stderr, "[RDMA_HOOKS] 从共享内存获取全局资源使用情况: QP=%d, MR=%d, Memory=%llu\n", 
                 usage->qp_count, usage->mr_count, (unsigned long long)usage->memory_used);
-        
-        close(temp_fd);
-        return 0;
     } else {
-        // 解析失败，返回错误
-        fprintf(stderr, "[RDMA_HOOKS] 无法解析全局资源响应: %s\n", buffer);
-        close(temp_fd);
-        return -1;
+        // 如果获取失败，返回0值
+        memset(usage, 0, sizeof(resource_usage_t));
+        fprintf(stderr, "[RDMA_HOOKS] 无法从共享内存获取全局资源使用情况\n");
     }
+    
+    return result;
 }
 
 /* 初始化函数指针 */
@@ -333,14 +215,14 @@ static void init_function_pointers(void) {
     init_dynamic_policy();
     fprintf(stderr, "[RDMA_HOOKS] Dynamic policy initialized\n");
     
-    /* 初始化eBPF监控 */
+    /* 初始化eBPF监控（通过共享内存） */
     int ebpf_err = ebpf_monitor_init();
     if (ebpf_err) {
-        fprintf(stderr, "[RDMA_HOOKS] WARNING: Failed to initialize eBPF monitor: %d\n", ebpf_err);
+        fprintf(stderr, "[RDMA_HOOKS] WARNING: Failed to initialize eBPF monitor with shared memory: %d\n", ebpf_err);
         fprintf(stderr, "[RDMA_HOOKS] Continuing without eBPF monitoring\n");
         ebpf_initialized = 0;  // 标记eBPF未初始化
     } else {
-        fprintf(stderr, "[RDMA_HOOKS] eBPF monitor initialized successfully\n");
+        fprintf(stderr, "[RDMA_HOOKS] eBPF monitor with shared memory initialized successfully\n");
         ebpf_initialized = 1;  // 标记eBPF已初始化
     }
 }
@@ -418,16 +300,20 @@ static bool check_qp_creation_restrictions(struct ibv_pd *pd, struct ibv_qp_init
             break;
     }
     
-    /* 优先通过collector_server获取进程资源使用情况 */
+    /* 优先通过共享内存获取进程资源使用情况 */
     resource_usage_t proc_usage;
     int pid = getpid();
-    int collector_err = get_process_resources_via_collector(pid, &proc_usage);
+    int collector_err = get_process_resources_via_shared_memory(pid, &proc_usage);
     
-    /* 检查本地QP数量限制 */
+    /* 检查本地QP数量限制 - 需要考虑当前操作 */
     if (collector_err == 0) {
-        if ((uint32_t)proc_usage.qp_count >= g_intercept_state.config.max_qp_per_process) {
-            rdma_intercept_log(LOG_LEVEL_ERROR, "QP creation denied: max QP per process (%d) reached", 
-                             g_intercept_state.config.max_qp_per_process);
+        /* 强制使用共享内存中的计数，不回退到本地计数 */
+        uint32_t effective_qp_count = (uint32_t)proc_usage.qp_count;
+        bool allow_creation = (effective_qp_count + 1) <= g_intercept_state.config.max_qp_per_process;
+        
+        if (!allow_creation) {
+            rdma_intercept_log(LOG_LEVEL_ERROR, "QP creation denied: would exceed max QP per process (%d), effective count: %d", 
+                             g_intercept_state.config.max_qp_per_process, effective_qp_count);
             return false;
         }
     } else {
@@ -435,24 +321,44 @@ static bool check_qp_creation_restrictions(struct ibv_pd *pd, struct ibv_qp_init
         if (ebpf_initialized) {
             int ebpf_err = ebpf_get_process_resources(pid, &proc_usage);
             if (ebpf_err == 0) {
-                if ((uint32_t)proc_usage.qp_count >= g_intercept_state.config.max_qp_per_process) {
-                    rdma_intercept_log(LOG_LEVEL_ERROR, "QP creation denied: max QP per process (%d) reached", 
-                                     g_intercept_state.config.max_qp_per_process);
+                pthread_mutex_lock(&g_intercept_state.resource_mutex);
+                uint32_t effective_qp_count = (proc_usage.qp_count == 0 && g_intercept_state.qp_count > 0) ? 
+                                            g_intercept_state.qp_count : (uint32_t)proc_usage.qp_count;
+                bool allow_creation = (effective_qp_count + 1) <= g_intercept_state.config.max_qp_per_process;
+                pthread_mutex_unlock(&g_intercept_state.resource_mutex);
+                
+                if (!allow_creation) {
+                    rdma_intercept_log(LOG_LEVEL_ERROR, "QP creation denied: would exceed max QP per process (%d), effective count: %d", 
+                                     g_intercept_state.config.max_qp_per_process, effective_qp_count);
                     return false;
                 }
             } else {
-                /* eBPF获取失败，使用本地计数作为最后的备用 */
-                if (g_intercept_state.qp_count >= g_intercept_state.config.max_qp_per_process) {
-                    rdma_intercept_log(LOG_LEVEL_ERROR, "QP creation denied: max QP per process (%d) reached", 
-                                     g_intercept_state.config.max_qp_per_process);
+                /* eBPF获取失败，使用本地计数作为最后的备用，考虑当前操作 */
+                /* 为了防止竞态条件，需要在检查和更新本地计数时加锁 */
+                pthread_mutex_lock(&g_intercept_state.resource_mutex);
+                bool allow_creation = (g_intercept_state.qp_count + 1) <= g_intercept_state.config.max_qp_per_process;
+                if (!allow_creation) {
+                    rdma_intercept_log(LOG_LEVEL_ERROR, "QP creation denied: would exceed max QP per process (%d), current local count: %d", 
+                                     g_intercept_state.config.max_qp_per_process, g_intercept_state.qp_count);
+                }
+                pthread_mutex_unlock(&g_intercept_state.resource_mutex);
+                
+                if (!allow_creation) {
                     return false;
                 }
             }
         } else {
-            /* eBPF未初始化，使用本地计数作为最后的备用 */
-            if (g_intercept_state.qp_count >= g_intercept_state.config.max_qp_per_process) {
-                rdma_intercept_log(LOG_LEVEL_ERROR, "QP creation denied: max QP per process (%d) reached", 
-                                 g_intercept_state.config.max_qp_per_process);
+            /* eBPF未初始化，使用本地计数作为最后的备用，考虑当前操作 */
+            /* 为了防止竞态条件，需要在检查和更新本地计数时加锁 */
+            pthread_mutex_lock(&g_intercept_state.resource_mutex);
+            bool allow_creation = (g_intercept_state.qp_count + 1) <= g_intercept_state.config.max_qp_per_process;
+            if (!allow_creation) {
+                rdma_intercept_log(LOG_LEVEL_ERROR, "QP creation denied: would exceed max QP per process (%d), current local count: %d", 
+                                 g_intercept_state.config.max_qp_per_process, g_intercept_state.qp_count);
+            }
+            pthread_mutex_unlock(&g_intercept_state.resource_mutex);
+            
+            if (!allow_creation) {
                 return false;
             }
         }
@@ -460,7 +366,7 @@ static bool check_qp_creation_restrictions(struct ibv_pd *pd, struct ibv_qp_init
     
     /* 获取全局资源使用情况并检查全局QP限制 */
     resource_usage_t global_usage;
-    int global_err = get_global_resources_via_collector(&global_usage);
+    int global_err = get_global_resources_via_shared_memory(&global_usage);
     if (global_err == 0) {
         if ((uint32_t)global_usage.qp_count >= g_intercept_state.config.max_global_qp) {
             rdma_intercept_log(LOG_LEVEL_ERROR, "QP creation denied: global QP limit (%d) reached (current: %d)", 
@@ -468,7 +374,7 @@ static bool check_qp_creation_restrictions(struct ibv_pd *pd, struct ibv_qp_init
             return false;
         }
     } else {
-        rdma_intercept_log(LOG_LEVEL_WARN, "Failed to get global resources from collector, skipping global limit check");
+        rdma_intercept_log(LOG_LEVEL_WARN, "Failed to get global resources from shared memory, skipping global limit check");
     }
     
     /* 检查WR限制 */
@@ -520,29 +426,31 @@ struct ibv_qp *ibv_create_qp(struct ibv_pd *pd, struct ibv_qp_init_attr *qp_init
         log_qp_creation(pd, qp_init_attr, qp, "ibv_create_qp");
         
         /* 无论eBPF是否工作，都更新本地计数（作为备份和一致性保证） */
+        pthread_mutex_lock(&g_intercept_state.resource_mutex);
         g_intercept_state.qp_count++;
+        pthread_mutex_unlock(&g_intercept_state.resource_mutex);
         
-        /* 更新资源统计（优先使用collector_server，然后是eBPF，最后是本地计数） */
-        resource_usage_t proc_usage;
+        /* 直接更新共享内存，不依赖eBPF */
+        resource_usage_t new_usage;
         int pid = getpid();
-        int collector_err = get_process_resources_via_collector(pid, &proc_usage);
+        
+        /* 使用本地计数直接更新共享内存，避免并发问题 */
+        new_usage.qp_count = g_intercept_state.qp_count;
+        new_usage.mr_count = g_intercept_state.mr_count;
+        new_usage.memory_used = g_intercept_state.memory_used;
+        
+        /* 更新共享内存中的进程资源计数 */
+        int update_err = shm_update_process_resources(pid, &new_usage);
+        if (update_err != 0) {
+            rdma_intercept_log(LOG_LEVEL_WARN, "Failed to update process resources in shared memory: PID=%d", pid);
+        } else {
+            rdma_intercept_log(LOG_LEVEL_DEBUG, "Updated process resources in shared memory: PID=%d, QP=%d, MR=%d, Memory=%llu", 
+                             pid, new_usage.qp_count, new_usage.mr_count, (unsigned long long)new_usage.memory_used);
+        }
         
         /* 只在信息级别及以下记录成功信息 */
         if (g_intercept_state.config.log_level <= LOG_LEVEL_INFO) {
-            uint32_t qp_count = 0;
-            if (collector_err == 0) {
-                qp_count = (uint32_t)proc_usage.qp_count;
-            } else if (ebpf_initialized) {
-                int ebpf_err = ebpf_get_process_resources(pid, &proc_usage);
-                if (ebpf_err == 0) {
-                    qp_count = (uint32_t)proc_usage.qp_count;
-                } else {
-                    qp_count = g_intercept_state.qp_count;
-                }
-            } else {
-                qp_count = g_intercept_state.qp_count;
-            }
-            
+            uint32_t qp_count = g_intercept_state.qp_count;
             rdma_intercept_log(LOG_LEVEL_INFO, "QP created successfully: %p (current count: %u)", 
                              qp, qp_count);
         }
@@ -583,14 +491,16 @@ int ibv_destroy_qp(struct ibv_qp *qp) {
     
     if (result == 0) {
         /* 无论eBPF是否工作，都更新本地计数（作为备份和一致性保证） */
+        pthread_mutex_lock(&g_intercept_state.resource_mutex);
         if (g_intercept_state.qp_count > 0) {
             g_intercept_state.qp_count--;
         }
+        pthread_mutex_unlock(&g_intercept_state.resource_mutex);
         
         /* 更新资源统计（优先使用collector_server，然后是eBPF，最后是本地计数） */
         resource_usage_t proc_usage;
         int pid = getpid();
-        int collector_err = get_process_resources_via_collector(pid, &proc_usage);
+        int collector_err = get_process_resources_via_shared_memory(pid, &proc_usage);
         
         /* 只在信息级别及以下记录成功信息 */
         if (g_intercept_state.config.log_level <= LOG_LEVEL_INFO) {
@@ -897,7 +807,7 @@ int ibv_dereg_mr(struct ibv_mr *mr) {
         /* 更新资源统计（优先使用collector_server，然后是eBPF，最后是本地计数） */
         resource_usage_t proc_usage;
         int pid = getpid();
-        int collector_err = get_process_resources_via_collector(pid, &proc_usage);
+        int collector_err = get_process_resources_via_shared_memory(pid, &proc_usage);
         
         /* 只在信息级别及以下记录成功信息 */
         if (g_intercept_state.config.log_level <= LOG_LEVEL_INFO) {
@@ -1124,7 +1034,7 @@ struct ibv_mr *__real_ibv_reg_mr(struct ibv_pd *pd, void *addr, size_t length, i
     /* 优先通过collector_server获取进程资源使用情况 */
     resource_usage_t proc_usage;
     int pid = getpid();
-    int collector_err = get_process_resources_via_collector(pid, &proc_usage);
+    int collector_err = get_process_resources_via_shared_memory(pid, &proc_usage);
     
     /* 检查内存资源限制 */
     if (g_intercept_state.config.enable_mr_control) {
@@ -1217,7 +1127,7 @@ struct ibv_mr *__real_ibv_reg_mr(struct ibv_pd *pd, void *addr, size_t length, i
         /* 更新资源统计（优先使用collector_server，然后是eBPF，最后是本地计数） */
         resource_usage_t proc_usage;
         int pid = getpid();
-        int collector_err = get_process_resources_via_collector(pid, &proc_usage);
+        int collector_err = get_process_resources_via_shared_memory(pid, &proc_usage);
         
         /* 只在信息级别及以下记录成功信息 */
         if (g_intercept_state.config.log_level <= LOG_LEVEL_INFO) {
