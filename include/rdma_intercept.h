@@ -46,6 +46,9 @@ typedef struct {
     bool allow_ud_qp;             /* 允许UD类型QP */
     bool allow_rq_qp;             /* 允许RQ类型QP */
     
+    /* 全局资源管理配置 */
+    uint32_t max_global_qp;       /* 全局最大QP数量 */
+    
     /* 内存资源管理配置 */
     bool enable_mr_control;       /* 启用内存区域控制 */
     uint32_t max_mr_per_process;  /* 每个进程的最大MR数量 */

@@ -91,6 +91,15 @@ static int parse_allow_ud_qp(const char *value, intercept_config_t *config) {
     return parse_bool(value, &config->allow_ud_qp);
 }
 
+static int parse_max_global_qp(const char *value, intercept_config_t *config) {
+    long val = strtol(value, NULL, 10);
+    if (val <= 0 || val > UINT32_MAX) {
+        return -1;
+    }
+    config->max_global_qp = (uint32_t)val;
+    return 0;
+}
+
 /* 配置表 */
 static config_entry_t config_table[] = {
     {"enable_intercept", NULL, (int (*)(const char *, intercept_config_t *))parse_enable_intercept},
@@ -107,6 +116,7 @@ static config_entry_t config_table[] = {
     {"allow_rc_qp", NULL, (int (*)(const char *, intercept_config_t *))parse_allow_rc_qp},
     {"allow_uc_qp", NULL, (int (*)(const char *, intercept_config_t *))parse_allow_uc_qp},
     {"allow_ud_qp", NULL, (int (*)(const char *, intercept_config_t *))parse_allow_ud_qp},
+    {"max_global_qp", NULL, (int (*)(const char *, intercept_config_t *))parse_max_global_qp},
     
     {NULL, NULL, NULL}
 };
@@ -260,6 +270,15 @@ static void load_config_from_env(intercept_config_t *config) {
         }
     }
     
+    /* 全局最大QP数量 */
+    env_val = getenv("RDMA_INTERCEPT_MAX_GLOBAL_QP");
+    if (env_val) {
+        long val = strtol(env_val, NULL, 10);
+        if (val > 0 && val <= UINT32_MAX) {
+            config->max_global_qp = (uint32_t)val;
+        }
+    }
+    
     /* 发送WR限制 */
     env_val = getenv("RDMA_INTERCEPT_MAX_SEND_WR_LIMIT");
     if (env_val) {
@@ -316,6 +335,12 @@ static void load_config_from_env(intercept_config_t *config) {
         if (val > 0) {
             config->max_memory_per_process = val;
         }
+    }
+    
+    /* 日志文件路径 */
+    env_val = getenv("RDMA_INTERCEPT_LOG_FILE_PATH");
+    if (env_val) {
+        parse_string(env_val, config->log_file_path, sizeof(config->log_file_path));
     }
 }
 

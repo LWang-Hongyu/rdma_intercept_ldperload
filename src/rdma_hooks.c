@@ -8,7 +8,10 @@
 #include <unistd.h>
 #include <errno.h>
 #include <infiniband/verbs.h>
+#include <sys/socket.h>
+#include <sys/un.h>
 #include "rdma_intercept.h"
+#include "ebpf/ebpf_monitor.h"
 
 // 前向声明
 uint32_t collector_get_global_qp_count(void);
@@ -65,6 +68,166 @@ static ibv_destroy_ah_fn real_ibv_destroy_ah = NULL;
 
 /* 静态初始化标志 */
 static pthread_once_t hooks_init_once = PTHREAD_ONCE_INIT;
+
+/* eBPF初始化状态 */
+static int ebpf_initialized = 0;
+
+/* 通过collector_server获取进程资源使用情况 */
+static int get_process_resources_via_collector(int pid, resource_usage_t *usage)
+{
+    if (!usage) {
+        return -1;
+    }
+    
+    char buffer[1024];
+    int n;
+    int temp_fd = -1;
+    struct sockaddr_un addr;
+
+    // 创建临时socket连接
+    temp_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (temp_fd < 0) {
+        fprintf(stderr, "[RDMA_HOOKS] 无法创建collector socket: %d\n", errno);
+        return -1;
+    }
+
+    // 准备地址
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    strncpy(addr.sun_path, "/tmp/rdma_collector.sock", sizeof(addr.sun_path) - 1);
+
+    // 连接到服务
+    int err = connect(temp_fd, (struct sockaddr *)&addr, sizeof(addr));
+    if (err < 0) {
+        fprintf(stderr, "[RDMA_HOOKS] 无法连接到数据收集服务: %d\n", errno);
+        close(temp_fd);
+        return -1;
+    }
+
+    // 发送请求获取特定进程的统计信息
+    char request[256];
+    snprintf(request, sizeof(request), "GET_PROC_STATS:%d", pid);
+    n = write(temp_fd, request, strlen(request));
+    if (n < 0) {
+        fprintf(stderr, "[RDMA_HOOKS] 无法发送请求: %d\n", errno);
+        close(temp_fd);
+        return -1;
+    }
+
+    // 读取响应
+    n = read(temp_fd, buffer, sizeof(buffer) - 1);
+    if (n < 0) {
+        fprintf(stderr, "[RDMA_HOOKS] 无法读取响应: %d\n", errno);
+        close(temp_fd);
+        return -1;
+    }
+
+    buffer[n] = '\0';
+
+    // 解析响应 - 格式: "QP:1,MR:2,Memory:4096"
+    char *qp_str = strstr(buffer, "QP:");
+    char *mr_str = strstr(buffer, ",MR:");
+    char *mem_str = strstr(buffer, ",Memory:");
+    
+    if (qp_str && mr_str && mem_str) {
+        usage->qp_count = atoi(qp_str + 3);
+        usage->mr_count = atoi(mr_str + 4);
+        usage->memory_used = atol(mem_str + 8);
+        
+        fprintf(stderr, "[RDMA_HOOKS] 从collector获取进程资源使用情况: PID=%d, QP=%d, MR=%d, Memory=%llu\n", 
+                pid, usage->qp_count, usage->mr_count, (unsigned long long)usage->memory_used);
+        
+        close(temp_fd);
+        return 0;
+    } else {
+        // 如果特定进程信息不可用，返回0值
+        memset(usage, 0, sizeof(resource_usage_t));
+        close(temp_fd);
+        return 0;  // 返回0表示成功，但没有找到进程信息
+    }
+}
+
+/* 通过collector_server获取全局资源使用情况 */
+static int get_global_resources_via_collector(resource_usage_t *usage)
+{
+    if (!usage) {
+        return -1;
+    }
+    
+    char buffer[1024];
+    int n;
+    int temp_fd = -1;
+    struct sockaddr_un addr;
+
+    // 创建临时socket连接
+    temp_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (temp_fd < 0) {
+        fprintf(stderr, "[RDMA_HOOKS] 无法创建collector socket: %d\n", errno);
+        return -1;
+    }
+
+    // 准备地址
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    strncpy(addr.sun_path, "/tmp/rdma_collector.sock", sizeof(addr.sun_path) - 1);
+
+    // 连接到服务
+    int err = connect(temp_fd, (struct sockaddr *)&addr, sizeof(addr));
+    if (err < 0) {
+        fprintf(stderr, "[RDMA_HOOKS] 无法连接到数据收集服务: %d\n", errno);
+        close(temp_fd);
+        return -1;
+    }
+
+    // 发送请求获取全局统计信息
+    const char *request = "GET_STATS";
+    n = write(temp_fd, request, strlen(request));
+    if (n < 0) {
+        fprintf(stderr, "[RDMA_HOOKS] 无法发送全局资源请求: %d\n", errno);
+        close(temp_fd);
+        return -1;
+    }
+
+    // 读取响应
+    n = read(temp_fd, buffer, sizeof(buffer) - 1);
+    if (n < 0) {
+        fprintf(stderr, "[RDMA_HOOKS] 无法读取全局资源响应: %d\n", errno);
+        close(temp_fd);
+        return -1;
+    }
+
+    buffer[n] = '\0';
+
+    // 解析响应 - 格式: "Total QP: 5\nMax QP: 10\nTotal MR: 2\nTotal Memory Used: 8192 bytes\nMax Memory: 10737418240 bytes\n"
+    char *qp_str = strstr(buffer, "Total QP: ");
+    char *mr_str = strstr(buffer, "Total MR: ");
+    char *mem_str = strstr(buffer, "Total Memory Used: ");
+    
+    if (qp_str && mr_str && mem_str) {
+        usage->qp_count = atoi(qp_str + 10);  // "Total QP: " is 10 chars
+        usage->mr_count = atoi(mr_str + 10);  // "Total MR: " is 10 chars
+        // Find the memory value before "bytes"
+        char *bytes_pos = strstr(mem_str, " bytes");
+        if (bytes_pos) {
+            *bytes_pos = '\0';  // Temporarily terminate string at "bytes"
+            usage->memory_used = atol(mem_str + 19);  // "Total Memory Used: " is 19 chars
+            *bytes_pos = ' ';   // Restore space
+        } else {
+            usage->memory_used = atol(mem_str + 19);  // Fallback if "bytes" not found
+        }
+        
+        fprintf(stderr, "[RDMA_HOOKS] 从collector获取全局资源使用情况: QP=%d, MR=%d, Memory=%llu\n", 
+                usage->qp_count, usage->mr_count, (unsigned long long)usage->memory_used);
+        
+        close(temp_fd);
+        return 0;
+    } else {
+        // 解析失败，返回错误
+        fprintf(stderr, "[RDMA_HOOKS] 无法解析全局资源响应: %s\n", buffer);
+        close(temp_fd);
+        return -1;
+    }
+}
 
 /* 初始化函数指针 */
 static void init_function_pointers(void) {
@@ -169,6 +332,17 @@ static void init_function_pointers(void) {
     /* 初始化动态策略 */
     init_dynamic_policy();
     fprintf(stderr, "[RDMA_HOOKS] Dynamic policy initialized\n");
+    
+    /* 初始化eBPF监控 */
+    int ebpf_err = ebpf_monitor_init();
+    if (ebpf_err) {
+        fprintf(stderr, "[RDMA_HOOKS] WARNING: Failed to initialize eBPF monitor: %d\n", ebpf_err);
+        fprintf(stderr, "[RDMA_HOOKS] Continuing without eBPF monitoring\n");
+        ebpf_initialized = 0;  // 标记eBPF未初始化
+    } else {
+        fprintf(stderr, "[RDMA_HOOKS] eBPF monitor initialized successfully\n");
+        ebpf_initialized = 1;  // 标记eBPF已初始化
+    }
 }
 
 
@@ -208,6 +382,7 @@ static void log_qp_creation(struct ibv_pd *pd, struct ibv_qp_init_attr *qp_init_
 
 /* 检查QP创建是否符合资源限制 */
 static bool check_qp_creation_restrictions(struct ibv_pd *pd, struct ibv_qp_init_attr *qp_init_attr) {
+    (void)pd; // 避免未使用参数的警告
     rdma_intercept_log(LOG_LEVEL_INFO, "开始检查QP创建限制");
     
     if (!g_intercept_state.config.enable_qp_control) {
@@ -243,18 +418,57 @@ static bool check_qp_creation_restrictions(struct ibv_pd *pd, struct ibv_qp_init
             break;
     }
     
-    /* 检查动态策略（基于全局QP使用情况） */
-    rdma_intercept_log(LOG_LEVEL_INFO, "检查动态策略");
-    if (!check_dynamic_qp_policy(pd, qp_init_attr)) {
-        rdma_intercept_log(LOG_LEVEL_ERROR, "QP creation denied by dynamic policy");
-        return false;
-    }
+    /* 优先通过collector_server获取进程资源使用情况 */
+    resource_usage_t proc_usage;
+    int pid = getpid();
+    int collector_err = get_process_resources_via_collector(pid, &proc_usage);
     
     /* 检查本地QP数量限制 */
-    if (g_intercept_state.qp_count >= g_intercept_state.config.max_qp_per_process) {
-        rdma_intercept_log(LOG_LEVEL_ERROR, "QP creation denied: max QP per process (%d) reached", 
-                         g_intercept_state.config.max_qp_per_process);
-        return false;
+    if (collector_err == 0) {
+        if ((uint32_t)proc_usage.qp_count >= g_intercept_state.config.max_qp_per_process) {
+            rdma_intercept_log(LOG_LEVEL_ERROR, "QP creation denied: max QP per process (%d) reached", 
+                             g_intercept_state.config.max_qp_per_process);
+            return false;
+        }
+    } else {
+        /* 如果collector获取失败，回退到eBPF */
+        if (ebpf_initialized) {
+            int ebpf_err = ebpf_get_process_resources(pid, &proc_usage);
+            if (ebpf_err == 0) {
+                if ((uint32_t)proc_usage.qp_count >= g_intercept_state.config.max_qp_per_process) {
+                    rdma_intercept_log(LOG_LEVEL_ERROR, "QP creation denied: max QP per process (%d) reached", 
+                                     g_intercept_state.config.max_qp_per_process);
+                    return false;
+                }
+            } else {
+                /* eBPF获取失败，使用本地计数作为最后的备用 */
+                if (g_intercept_state.qp_count >= g_intercept_state.config.max_qp_per_process) {
+                    rdma_intercept_log(LOG_LEVEL_ERROR, "QP creation denied: max QP per process (%d) reached", 
+                                     g_intercept_state.config.max_qp_per_process);
+                    return false;
+                }
+            }
+        } else {
+            /* eBPF未初始化，使用本地计数作为最后的备用 */
+            if (g_intercept_state.qp_count >= g_intercept_state.config.max_qp_per_process) {
+                rdma_intercept_log(LOG_LEVEL_ERROR, "QP creation denied: max QP per process (%d) reached", 
+                                 g_intercept_state.config.max_qp_per_process);
+                return false;
+            }
+        }
+    }
+    
+    /* 获取全局资源使用情况并检查全局QP限制 */
+    resource_usage_t global_usage;
+    int global_err = get_global_resources_via_collector(&global_usage);
+    if (global_err == 0) {
+        if ((uint32_t)global_usage.qp_count >= g_intercept_state.config.max_global_qp) {
+            rdma_intercept_log(LOG_LEVEL_ERROR, "QP creation denied: global QP limit (%d) reached (current: %d)", 
+                             g_intercept_state.config.max_global_qp, (uint32_t)global_usage.qp_count);
+            return false;
+        }
+    } else {
+        rdma_intercept_log(LOG_LEVEL_WARN, "Failed to get global resources from collector, skipping global limit check");
     }
     
     /* 检查WR限制 */
@@ -302,19 +516,35 @@ struct ibv_qp *ibv_create_qp(struct ibv_pd *pd, struct ibv_qp_init_attr *qp_init
     struct ibv_qp *qp = real_ibv_create_qp(pd, qp_init_attr);
     
     if (qp) {
-        /* 发送QP创建事件 */
-        collector_send_qp_create_event();
-        
-        /* 更新QP计数（无锁操作，因为QP创建是串行的） */
-        g_intercept_state.qp_count++;
-        
         /* 记录QP创建信息（已优化，减少锁持有时间） */
         log_qp_creation(pd, qp_init_attr, qp, "ibv_create_qp");
         
+        /* 无论eBPF是否工作，都更新本地计数（作为备份和一致性保证） */
+        g_intercept_state.qp_count++;
+        
+        /* 更新资源统计（优先使用collector_server，然后是eBPF，最后是本地计数） */
+        resource_usage_t proc_usage;
+        int pid = getpid();
+        int collector_err = get_process_resources_via_collector(pid, &proc_usage);
+        
         /* 只在信息级别及以下记录成功信息 */
         if (g_intercept_state.config.log_level <= LOG_LEVEL_INFO) {
-            rdma_intercept_log(LOG_LEVEL_INFO, "QP created successfully: %p (current count: %d)", 
-                             qp, g_intercept_state.qp_count);
+            uint32_t qp_count = 0;
+            if (collector_err == 0) {
+                qp_count = (uint32_t)proc_usage.qp_count;
+            } else if (ebpf_initialized) {
+                int ebpf_err = ebpf_get_process_resources(pid, &proc_usage);
+                if (ebpf_err == 0) {
+                    qp_count = (uint32_t)proc_usage.qp_count;
+                } else {
+                    qp_count = g_intercept_state.qp_count;
+                }
+            } else {
+                qp_count = g_intercept_state.qp_count;
+            }
+            
+            rdma_intercept_log(LOG_LEVEL_INFO, "QP created successfully: %p (current count: %u)", 
+                             qp, qp_count);
         }
     } else {
         /* 错误信息总是记录 */
@@ -352,18 +582,34 @@ int ibv_destroy_qp(struct ibv_qp *qp) {
     int result = real_ibv_destroy_qp(qp);
     
     if (result == 0) {
-        /* 发送QP销毁事件 */
-        collector_send_qp_destroy_event();
-        
-        /* 更新QP计数（无锁操作，因为QP销毁是串行的） */
+        /* 无论eBPF是否工作，都更新本地计数（作为备份和一致性保证） */
         if (g_intercept_state.qp_count > 0) {
             g_intercept_state.qp_count--;
         }
         
+        /* 更新资源统计（优先使用collector_server，然后是eBPF，最后是本地计数） */
+        resource_usage_t proc_usage;
+        int pid = getpid();
+        int collector_err = get_process_resources_via_collector(pid, &proc_usage);
+        
         /* 只在信息级别及以下记录成功信息 */
         if (g_intercept_state.config.log_level <= LOG_LEVEL_INFO) {
-            rdma_intercept_log(LOG_LEVEL_INFO, "QP destroyed successfully: %p (current count: %d)", 
-                             qp, g_intercept_state.qp_count);
+            uint32_t qp_count = 0;
+            if (collector_err == 0) {
+                qp_count = (uint32_t)proc_usage.qp_count;
+            } else if (ebpf_initialized) {
+                int ebpf_err = ebpf_get_process_resources(pid, &proc_usage);
+                if (ebpf_err == 0) {
+                    qp_count = (uint32_t)proc_usage.qp_count;
+                } else {
+                    qp_count = g_intercept_state.qp_count;
+                }
+            } else {
+                qp_count = g_intercept_state.qp_count;
+            }
+            
+            rdma_intercept_log(LOG_LEVEL_INFO, "QP destroyed successfully: %p (current count: %u)", 
+                             qp, qp_count);
         }
     } else {
         /* 错误信息总是记录 */
@@ -640,22 +886,43 @@ int ibv_dereg_mr(struct ibv_mr *mr) {
     int result = real_ibv_dereg_mr(mr);
     
     if (result == 0) {
-        /* 发送MR销毁事件 */
-        collector_send_mr_destroy_event(mr_length);
-        
-        /* 更新内存资源状态 */
+        /* 无论eBPF是否工作，都更新本地计数（作为备份和一致性保证） */
         if (g_intercept_state.mr_count > 0) {
             g_intercept_state.mr_count--;
         }
-        if (mr_length > 0 && g_intercept_state.memory_used >= mr_length) {
+        if (g_intercept_state.memory_used >= mr_length) {
             g_intercept_state.memory_used -= mr_length;
         }
         
+        /* 更新资源统计（优先使用collector_server，然后是eBPF，最后是本地计数） */
+        resource_usage_t proc_usage;
+        int pid = getpid();
+        int collector_err = get_process_resources_via_collector(pid, &proc_usage);
+        
         /* 只在信息级别及以下记录成功信息 */
         if (g_intercept_state.config.log_level <= LOG_LEVEL_INFO) {
-            rdma_intercept_log(LOG_LEVEL_INFO, "MR deregistered successfully: %p, length=%zu (current count: %d, memory used: %llu)", 
-                             mr, mr_length, g_intercept_state.mr_count, 
-                             (unsigned long long)g_intercept_state.memory_used);
+            uint32_t mr_count = 0;
+            uint64_t memory_used = 0;
+            if (collector_err == 0) {
+                mr_count = (uint32_t)proc_usage.mr_count;
+                memory_used = proc_usage.memory_used;
+            } else if (ebpf_initialized) {
+                int ebpf_err = ebpf_get_process_resources(pid, &proc_usage);
+                if (ebpf_err == 0) {
+                    mr_count = (uint32_t)proc_usage.mr_count;
+                    memory_used = proc_usage.memory_used;
+                } else {
+                    mr_count = g_intercept_state.mr_count;
+                    memory_used = g_intercept_state.memory_used;
+                }
+            } else {
+                mr_count = g_intercept_state.mr_count;
+                memory_used = g_intercept_state.memory_used;
+            }
+            
+            rdma_intercept_log(LOG_LEVEL_INFO, "MR deregistered successfully: %p, length=%zu (current count: %u, memory used: %llu)", 
+                             mr, mr_length, mr_count, 
+                             (unsigned long long)memory_used);
         }
     } else {
         /* 错误信息总是记录 */
@@ -854,21 +1121,81 @@ struct ibv_mr *__real_ibv_reg_mr(struct ibv_pd *pd, void *addr, size_t length, i
         rdma_intercept_log(LOG_LEVEL_DEBUG, "Intercepting ibv_reg_mr: PD=%p, addr=%p, length=%zu", pd, addr, length);
     }
 
+    /* 优先通过collector_server获取进程资源使用情况 */
+    resource_usage_t proc_usage;
+    int pid = getpid();
+    int collector_err = get_process_resources_via_collector(pid, &proc_usage);
+    
     /* 检查内存资源限制 */
     if (g_intercept_state.config.enable_mr_control) {
-        if (g_intercept_state.mr_count >= g_intercept_state.config.max_mr_per_process) {
-            rdma_intercept_log(LOG_LEVEL_ERROR, "MR registration denied: max MR per process (%d) reached", 
-                             g_intercept_state.config.max_mr_per_process);
-            errno = EPERM;
-            return NULL;
-        }
-        
-        if (g_intercept_state.memory_used + length > g_intercept_state.config.max_memory_per_process) {
-            rdma_intercept_log(LOG_LEVEL_ERROR, "MR registration denied: max memory per process (%llu) exceeded (current: %llu, requested: %zu)", 
-                             (unsigned long long)g_intercept_state.config.max_memory_per_process,
-                             (unsigned long long)g_intercept_state.memory_used, length);
-            errno = EPERM;
-            return NULL;
+        if (collector_err == 0) {
+            if ((uint32_t)proc_usage.mr_count >= g_intercept_state.config.max_mr_per_process) {
+                rdma_intercept_log(LOG_LEVEL_ERROR, "MR registration denied: max MR per process (%d) reached", 
+                                 g_intercept_state.config.max_mr_per_process);
+                errno = EPERM;
+                return NULL;
+            }
+            
+            if (proc_usage.memory_used + length > g_intercept_state.config.max_memory_per_process) {
+                rdma_intercept_log(LOG_LEVEL_ERROR, "MR registration denied: max memory per process (%llu) exceeded (current: %llu, requested: %zu)", 
+                                 (unsigned long long)g_intercept_state.config.max_memory_per_process,
+                                 (unsigned long long)proc_usage.memory_used, length);
+                errno = EPERM;
+                return NULL;
+            }
+        } else {
+            /* 如果collector获取失败，回退到eBPF */
+            if (ebpf_initialized) {
+                int ebpf_err = ebpf_get_process_resources(pid, &proc_usage);
+                if (ebpf_err == 0) {
+                    if ((uint32_t)proc_usage.mr_count >= g_intercept_state.config.max_mr_per_process) {
+                        rdma_intercept_log(LOG_LEVEL_ERROR, "MR registration denied: max MR per process (%d) reached", 
+                                         g_intercept_state.config.max_mr_per_process);
+                        errno = EPERM;
+                        return NULL;
+                    }
+                    
+                    if (proc_usage.memory_used + length > g_intercept_state.config.max_memory_per_process) {
+                        rdma_intercept_log(LOG_LEVEL_ERROR, "MR registration denied: max memory per process (%llu) exceeded (current: %llu, requested: %zu)", 
+                                         (unsigned long long)g_intercept_state.config.max_memory_per_process,
+                                         (unsigned long long)proc_usage.memory_used, length);
+                        errno = EPERM;
+                        return NULL;
+                    }
+                } else {
+                    /* eBPF获取失败，使用本地计数作为最后的备用 */
+                    if (g_intercept_state.mr_count >= g_intercept_state.config.max_mr_per_process) {
+                        rdma_intercept_log(LOG_LEVEL_ERROR, "MR registration denied: max MR per process (%d) reached", 
+                                         g_intercept_state.config.max_mr_per_process);
+                        errno = EPERM;
+                        return NULL;
+                    }
+                    
+                    if (g_intercept_state.memory_used + length > g_intercept_state.config.max_memory_per_process) {
+                        rdma_intercept_log(LOG_LEVEL_ERROR, "MR registration denied: max memory per process (%llu) exceeded (current: %llu, requested: %zu)", 
+                                         (unsigned long long)g_intercept_state.config.max_memory_per_process,
+                                         (unsigned long long)g_intercept_state.memory_used, length);
+                        errno = EPERM;
+                        return NULL;
+                    }
+                }
+            } else {
+                /* eBPF未初始化，使用本地计数作为最后的备用 */
+                if (g_intercept_state.mr_count >= g_intercept_state.config.max_mr_per_process) {
+                    rdma_intercept_log(LOG_LEVEL_ERROR, "MR registration denied: max MR per process (%d) reached", 
+                                     g_intercept_state.config.max_mr_per_process);
+                    errno = EPERM;
+                    return NULL;
+                }
+                
+                if (g_intercept_state.memory_used + length > g_intercept_state.config.max_memory_per_process) {
+                    rdma_intercept_log(LOG_LEVEL_ERROR, "MR registration denied: max memory per process (%llu) exceeded (current: %llu, requested: %zu)", 
+                                     (unsigned long long)g_intercept_state.config.max_memory_per_process,
+                                     (unsigned long long)g_intercept_state.memory_used, length);
+                    errno = EPERM;
+                    return NULL;
+                }
+            }
         }
     }
 
@@ -883,18 +1210,39 @@ struct ibv_mr *__real_ibv_reg_mr(struct ibv_pd *pd, void *addr, size_t length, i
     struct ibv_mr *mr = real_ibv_reg_mr(pd, addr, length, access);
     
     if (mr) {
-        /* 发送MR创建事件 */
-        collector_send_mr_create_event(length);
-        
-        /* 更新内存资源状态 */
+        /* 无论eBPF是否工作，都更新本地计数（作为备份和一致性保证） */
         g_intercept_state.mr_count++;
         g_intercept_state.memory_used += length;
         
+        /* 更新资源统计（优先使用collector_server，然后是eBPF，最后是本地计数） */
+        resource_usage_t proc_usage;
+        int pid = getpid();
+        int collector_err = get_process_resources_via_collector(pid, &proc_usage);
+        
         /* 只在信息级别及以下记录成功信息 */
         if (g_intercept_state.config.log_level <= LOG_LEVEL_INFO) {
-            rdma_intercept_log(LOG_LEVEL_INFO, "MR registered successfully: %p, length=%zu (current count: %d, memory used: %llu)", 
-                             mr, length, g_intercept_state.mr_count, 
-                             (unsigned long long)g_intercept_state.memory_used);
+            uint32_t mr_count = 0;
+            uint64_t memory_used = 0;
+            if (collector_err == 0) {
+                mr_count = (uint32_t)proc_usage.mr_count;
+                memory_used = proc_usage.memory_used;
+            } else if (ebpf_initialized) {
+                int ebpf_err = ebpf_get_process_resources(pid, &proc_usage);
+                if (ebpf_err == 0) {
+                    mr_count = (uint32_t)proc_usage.mr_count;
+                    memory_used = proc_usage.memory_used;
+                } else {
+                    mr_count = g_intercept_state.mr_count;
+                    memory_used = g_intercept_state.memory_used;
+                }
+            } else {
+                mr_count = g_intercept_state.mr_count;
+                memory_used = g_intercept_state.memory_used;
+            }
+            
+            rdma_intercept_log(LOG_LEVEL_INFO, "MR registered successfully: %p, length=%zu (current count: %u, memory used: %llu)", 
+                             mr, length, mr_count, 
+                             (unsigned long long)memory_used);
         }
     } else {
         /* 错误信息总是记录 */

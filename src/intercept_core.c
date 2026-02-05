@@ -30,6 +30,9 @@ intercept_state_t g_intercept_state = {
         .allow_ud_qp = true,         /* 默认允许UD类型 */
         .allow_rq_qp = true,         /* 默认允许RQ类型 */
         
+        /* 全局资源管理默认配置 */
+        .max_global_qp = 1000,       /* 默认全局最多1000个QP */
+        
         /* 内存资源管理默认配置 */
         .enable_mr_control = false,  /* 默认关闭内存控制 */
         .max_mr_per_process = 1000,  /* 默认每个进程最多1000个MR */
@@ -82,6 +85,9 @@ int rdma_intercept_init(void) {
 
     errno = 0;
 
+    /* 首先加载配置（包括环境变量），以确保日志文件路径等配置正确 */
+    rdma_intercept_load_config(NULL);
+    
     /* 打开日志文件 */
     g_intercept_state.log_file = fopen(g_intercept_state.config.log_file_path, "a");
     if (!g_intercept_state.log_file) {
@@ -90,9 +96,6 @@ int rdma_intercept_init(void) {
         errno = EIO;
         return -1;
     }
-    
-    /* 加载配置（包括环境变量） */
-    rdma_intercept_load_config(NULL);
 
     /* 直接打开libibverbs.so获取原始函数地址 */
     void *libibverbs = dlopen("libibverbs.so", RTLD_LAZY);
