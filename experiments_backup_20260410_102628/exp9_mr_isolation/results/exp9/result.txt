@@ -1,0 +1,35 @@
+# EXP-9: MR Resource Isolation Test Results
+# Tenant ID: 30
+# MR Size: 4096 bytes
+# Requested MRs: 20
+# Successful: 10
+# Failed: 10
+# Success Rate: 50.0%
+#
+# Latency Statistics (successful registrations only):
+#   Average: 32.29 us
+#   Min: 24.07 us
+#   Max: 88.00 us
+#
+# Per-MR Details:
+# MR_ID,SUCCESS,LATENCY_US,ERROR_CODE
+0,1,88.00,0
+1,1,30.67,0
+2,1,26.91,0
+3,1,25.18,0
+4,1,27.08,0
+5,1,25.17,0
+6,1,25.10,0
+7,1,25.62,0
+8,1,25.09,0
+9,1,24.07,0
+10,0,6.98,1
+11,0,5.33,1
+12,0,6.41,1
+13,0,4.74,1
+14,0,4.88,1
+15,0,6.29,1
+16,0,4.07,1
+17,0,5.13,1
+18,0,6.42,1
+19,0,4.89,1

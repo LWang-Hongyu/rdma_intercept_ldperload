@@ -1,6 +1,16 @@
 #ifndef RDMA_INTERCEPT_H
 #define RDMA_INTERCEPT_H
 
+/* 禁用调试日志以提高性能 */
+#ifdef NO_DEBUG
+  #include <stdio.h>
+  #define debug_fprintf(stream, fmt, ...) ((void)0)
+  #define INTERCEPT_LOG(stream, ...) ((void)0)
+#else
+  #define debug_fprintf(stream, fmt, ...) fprintf(stream, fmt, ##__VA_ARGS__)
+  #define INTERCEPT_LOG(stream, ...) fprintf(stream, ##__VA_ARGS__)
+#endif
+
 #include <stdint.h>
 #include <stdbool.h>
 #include <infiniband/verbs.h>

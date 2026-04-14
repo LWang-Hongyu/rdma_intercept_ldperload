@@ -5,7 +5,7 @@
 #include <sys/types.h>
 
 #define MAX_PROCESSES 1024
-#define SHM_NAME "/rdma_intercept_shm"
+#define SHM_NAME "/rdma_intercept_shm_v2"
 #define SHM_SIZE 4096
 
 // 资源使用情况结构

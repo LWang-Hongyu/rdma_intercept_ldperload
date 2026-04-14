@@ -1,4 +1,11 @@
 #define _GNU_SOURCE
+/* NO_DEBUG: Disable debug output for performance testing */
+#ifdef NO_DEBUG
+  #define DEBUG_FPRINTF(...) ((void)0)
+#else
+  #define DEBUG_FPRINTF(...) fprintf(__VA_ARGS__)
+#endif
+
 #include <dlfcn.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -92,7 +99,7 @@ int rdma_intercept_init(void) {
     /* 打开日志文件 */
     g_intercept_state.log_file = fopen(g_intercept_state.config.log_file_path, "a");
     if (!g_intercept_state.log_file) {
-        fprintf(stderr, "[RDMA_INTERCEPT] Failed to open log file: %s\n", 
+fprintf(stderr, "[RDMA_INTERCEPT] Failed to open log file: %s\n", 
                 g_intercept_state.config.log_file_path);
         errno = EIO;
         return -1;
@@ -101,7 +108,7 @@ int rdma_intercept_init(void) {
     /* 直接打开libibverbs.so获取原始函数地址 */
     void *libibverbs = dlopen("libibverbs.so", RTLD_LAZY);
     if (!libibverbs) {
-        fprintf(stderr, "[RDMA_INTERCEPT] Failed to open libibverbs.so: %s\n", dlerror());
+fprintf(stderr, "[RDMA_INTERCEPT] Failed to open libibverbs.so: %s\n", dlerror());
         fclose(g_intercept_state.log_file);
         errno = ENOSYS;
         return -1;
@@ -112,14 +119,14 @@ int rdma_intercept_init(void) {
     real_ibv_create_qp = (ibv_create_qp_fn)dlsym(libibverbs, "ibv_create_qp");
     
     if (!real_ibv_create_qp) {
-        fprintf(stderr, "[RDMA_INTERCEPT] Failed to find ibv_create_qp in libibverbs: %s\n", dlerror());
+fprintf(stderr, "[RDMA_INTERCEPT] Failed to find ibv_create_qp in libibverbs: %s\n", dlerror());
         dlclose(libibverbs);
         fclose(g_intercept_state.log_file);
         errno = ENOSYS;
         return -1;
     }
     
-    fprintf(stderr, "[RDMA_INTERCEPT] Found ibv_create_qp in libibverbs at: %p\n", real_ibv_create_qp);
+fprintf(stderr, "[RDMA_INTERCEPT] Found ibv_create_qp in libibverbs at: %p\n", real_ibv_create_qp);
     
     // ibv_create_qp_ex是内联函数，可能不存在于库中，所以不检查错误
     dlerror(); // 清除之前的错误
@@ -131,7 +138,7 @@ int rdma_intercept_init(void) {
     real_ibv_reg_mr = (ibv_reg_mr_fn)dlsym(libibverbs, "ibv_reg_mr");
     
     if (!real_ibv_reg_mr) {
-        fprintf(stderr, "[RDMA_INTERCEPT] Failed to find ibv_reg_mr in libibverbs: %s\n", dlerror());
+fprintf(stderr, "[RDMA_INTERCEPT] Failed to find ibv_reg_mr in libibverbs: %s\n", dlerror());
         dlclose(libibverbs);
         fclose(g_intercept_state.log_file);
         errno = ENOSYS;
@@ -143,15 +150,15 @@ int rdma_intercept_init(void) {
     real_ibv_dereg_mr = (ibv_dereg_mr_fn)dlsym(libibverbs, "ibv_dereg_mr");
     
     if (!real_ibv_dereg_mr) {
-        fprintf(stderr, "[RDMA_INTERCEPT] Failed to find ibv_dereg_mr in libibverbs: %s\n", dlerror());
+fprintf(stderr, "[RDMA_INTERCEPT] Failed to find ibv_dereg_mr in libibverbs: %s\n", dlerror());
         dlclose(libibverbs);
         fclose(g_intercept_state.log_file);
         errno = ENOSYS;
         return -1;
     }
     
-    fprintf(stderr, "[RDMA_INTERCEPT] Found ibv_reg_mr in libibverbs at: %p\n", real_ibv_reg_mr);
-    fprintf(stderr, "[RDMA_INTERCEPT] Found ibv_dereg_mr in libibverbs at: %p\n", real_ibv_dereg_mr);
+fprintf(stderr, "[RDMA_INTERCEPT] Found ibv_reg_mr in libibverbs at: %p\n", real_ibv_reg_mr);
+fprintf(stderr, "[RDMA_INTERCEPT] Found ibv_dereg_mr in libibverbs at: %p\n", real_ibv_dereg_mr);
     
     // 关闭libibverbs句柄
     dlclose(libibverbs);

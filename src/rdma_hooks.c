@@ -1,4 +1,11 @@
 #define _GNU_SOURCE
+/* NO_DEBUG: Disable debug output for performance testing */
+#ifdef NO_DEBUG
+  #define DEBUG_FPRINTF(...) ((void)0)
+#else
+  #define DEBUG_FPRINTF(...) fprintf(__VA_ARGS__)
+#endif
+
 #include <dlfcn.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -80,12 +87,12 @@ static int get_process_resources_via_shared_memory(int pid, resource_usage_t *us
     
     int result = shm_get_process_resources(pid, usage);
     if (result == 0) {
-        fprintf(stderr, "[RDMA_HOOKS] 从共享内存获取进程资源使用情况: PID=%d, QP=%d, MR=%d, Memory=%llu\n", 
+        DEBUG_FPRINTF(stderr, "[RDMA_HOOKS] 从共享内存获取进程资源使用情况: PID=%d, QP=%d, MR=%d, Memory=%llu\n", 
                 pid, usage->qp_count, usage->mr_count, (unsigned long long)usage->memory_used);
     } else {
         // 如果获取失败，返回0值
         memset(usage, 0, sizeof(resource_usage_t));
-        fprintf(stderr, "[RDMA_HOOKS] 无法从共享内存获取进程资源使用情况: PID=%d\n", pid);
+        DEBUG_FPRINTF(stderr, "[RDMA_HOOKS] 无法从共享内存获取进程资源使用情况: PID=%d\n", pid);
     }
     
     return result;
@@ -100,12 +107,12 @@ static int get_global_resources_via_shared_memory(resource_usage_t *usage)
     
     int result = shm_get_global_resources(usage);
     if (result == 0) {
-        fprintf(stderr, "[RDMA_HOOKS] 从共享内存获取全局资源使用情况: QP=%d, MR=%d, Memory=%llu\n", 
+        DEBUG_FPRINTF(stderr, "[RDMA_HOOKS] 从共享内存获取全局资源使用情况: QP=%d, MR=%d, Memory=%llu\n", 
                 usage->qp_count, usage->mr_count, (unsigned long long)usage->memory_used);
     } else {
         // 如果获取失败，返回0值
         memset(usage, 0, sizeof(resource_usage_t));
-        fprintf(stderr, "[RDMA_HOOKS] 无法从共享内存获取全局资源使用情况\n");
+        DEBUG_FPRINTF(stderr, "[RDMA_HOOKS] 无法从共享内存获取全局资源使用情况\n");
     }
     
     return result;
@@ -119,7 +126,7 @@ static void init_function_pointers(void) {
     /* 直接打开libibverbs.so获取原始函数地址 */
     void *libibverbs = dlopen("libibverbs.so", RTLD_LAZY);
     if (!libibverbs) {
-        fprintf(stderr, "[RDMA_HOOKS] Failed to open libibverbs.so: %s\n", dlerror());
+        DEBUG_FPRINTF(stderr, "[RDMA_HOOKS] Failed to open libibverbs.so: %s\n", dlerror());
         return;
     }
     
@@ -157,72 +164,72 @@ static void init_function_pointers(void) {
      */
     
     /* 使用printf而不是rdma_intercept_log，避免递归调用 */
-    fprintf(stderr, "[RDMA_HOOKS] Function pointers initialized\n");
+    DEBUG_FPRINTF(stderr, "[RDMA_HOOKS] Function pointers initialized\n");
     if (real_ibv_create_qp) {
-        fprintf(stderr, "[RDMA_HOOKS] ibv_create_qp: %p\n", real_ibv_create_qp);
+        DEBUG_FPRINTF(stderr, "[RDMA_HOOKS] ibv_create_qp: %p\n", real_ibv_create_qp);
     } else {
-        fprintf(stderr, "[RDMA_HOOKS] WARNING: ibv_create_qp not found\n");
+        DEBUG_FPRINTF(stderr, "[RDMA_HOOKS] WARNING: ibv_create_qp not found\n");
     }
     
     // 忽略ibv_create_qp_ex的错误，因为它可能是内联函数
     dlerror(); // 清除错误信息，防止影响后续dlsym调用
     if (real_ibv_create_qp_ex) {
-        fprintf(stderr, "[RDMA_HOOKS] ibv_create_qp_ex: %p\n", real_ibv_create_qp_ex);
+        DEBUG_FPRINTF(stderr, "[RDMA_HOOKS] ibv_create_qp_ex: %p\n", real_ibv_create_qp_ex);
     } else {
-        fprintf(stderr, "[RDMA_HOOKS] INFO: ibv_create_qp_ex not found (this is expected for inline functions)\n");
+        DEBUG_FPRINTF(stderr, "[RDMA_HOOKS] INFO: ibv_create_qp_ex not found (this is expected for inline functions)\n");
     }
     
     /* 输出SRQ函数指针信息 */
     if (real_ibv_create_srq) {
-        fprintf(stderr, "[RDMA_HOOKS] ibv_create_srq: %p\n", real_ibv_create_srq);
+        DEBUG_FPRINTF(stderr, "[RDMA_HOOKS] ibv_create_srq: %p\n", real_ibv_create_srq);
     } else {
-        fprintf(stderr, "[RDMA_HOOKS] WARNING: ibv_create_srq not found\n");
+        DEBUG_FPRINTF(stderr, "[RDMA_HOOKS] WARNING: ibv_create_srq not found\n");
     }
     if (real_ibv_modify_srq) {
-        fprintf(stderr, "[RDMA_HOOKS] ibv_modify_srq: %p\n", real_ibv_modify_srq);
+        DEBUG_FPRINTF(stderr, "[RDMA_HOOKS] ibv_modify_srq: %p\n", real_ibv_modify_srq);
     } else {
-        fprintf(stderr, "[RDMA_HOOKS] WARNING: ibv_modify_srq not found\n");
+        DEBUG_FPRINTF(stderr, "[RDMA_HOOKS] WARNING: ibv_modify_srq not found\n");
     }
     if (real_ibv_query_srq) {
-        fprintf(stderr, "[RDMA_HOOKS] ibv_query_srq: %p\n", real_ibv_query_srq);
+        DEBUG_FPRINTF(stderr, "[RDMA_HOOKS] ibv_query_srq: %p\n", real_ibv_query_srq);
     } else {
-        fprintf(stderr, "[RDMA_HOOKS] WARNING: ibv_query_srq not found\n");
+        DEBUG_FPRINTF(stderr, "[RDMA_HOOKS] WARNING: ibv_query_srq not found\n");
     }
     if (real_ibv_destroy_srq) {
-        fprintf(stderr, "[RDMA_HOOKS] ibv_destroy_srq: %p\n", real_ibv_destroy_srq);
+        DEBUG_FPRINTF(stderr, "[RDMA_HOOKS] ibv_destroy_srq: %p\n", real_ibv_destroy_srq);
     } else {
-        fprintf(stderr, "[RDMA_HOOKS] WARNING: ibv_destroy_srq not found\n");
+        DEBUG_FPRINTF(stderr, "[RDMA_HOOKS] WARNING: ibv_destroy_srq not found\n");
     }
     
     /* 输出AH函数指针信息 */
     if (real_ibv_create_ah) {
-        fprintf(stderr, "[RDMA_HOOKS] ibv_create_ah: %p\n", real_ibv_create_ah);
+        DEBUG_FPRINTF(stderr, "[RDMA_HOOKS] ibv_create_ah: %p\n", real_ibv_create_ah);
     } else {
-        fprintf(stderr, "[RDMA_HOOKS] WARNING: ibv_create_ah not found\n");
+        DEBUG_FPRINTF(stderr, "[RDMA_HOOKS] WARNING: ibv_create_ah not found\n");
     }
     if (real_ibv_modify_ah) {
-        fprintf(stderr, "[RDMA_HOOKS] ibv_modify_ah: %p\n", real_ibv_modify_ah);
+        DEBUG_FPRINTF(stderr, "[RDMA_HOOKS] ibv_modify_ah: %p\n", real_ibv_modify_ah);
     } else {
-        fprintf(stderr, "[RDMA_HOOKS] WARNING: ibv_modify_ah not found\n");
+        DEBUG_FPRINTF(stderr, "[RDMA_HOOKS] WARNING: ibv_modify_ah not found\n");
     }
     if (real_ibv_destroy_ah) {
-        fprintf(stderr, "[RDMA_HOOKS] ibv_destroy_ah: %p\n", real_ibv_destroy_ah);
+        DEBUG_FPRINTF(stderr, "[RDMA_HOOKS] ibv_destroy_ah: %p\n", real_ibv_destroy_ah);
     } else {
-        fprintf(stderr, "[RDMA_HOOKS] WARNING: ibv_destroy_ah not found\n");
+        DEBUG_FPRINTF(stderr, "[RDMA_HOOKS] WARNING: ibv_destroy_ah not found\n");
     }
     
     /* 初始化动态策略 */
     init_dynamic_policy();
-    fprintf(stderr, "[RDMA_HOOKS] Dynamic policy initialized\n");
+    DEBUG_FPRINTF(stderr, "[RDMA_HOOKS] Dynamic policy initialized\n");
     
     /* 初始化eBPF监控（通过共享内存） */
     int ebpf_err = ebpf_monitor_init();
     if (ebpf_err) {
-        fprintf(stderr, "[RDMA_HOOKS] WARNING: Failed to initialize eBPF monitor with shared memory: %d\n", ebpf_err);
-        fprintf(stderr, "[RDMA_HOOKS] Continuing without eBPF monitoring\n");
+        DEBUG_FPRINTF(stderr, "[RDMA_HOOKS] WARNING: Failed to initialize eBPF monitor with shared memory: %d\n", ebpf_err);
+        DEBUG_FPRINTF(stderr, "[RDMA_HOOKS] Continuing without eBPF monitoring\n");
         ebpf_initialized = 0;  // 标记eBPF未初始化
     } else {
-        fprintf(stderr, "[RDMA_HOOKS] eBPF monitor with shared memory initialized successfully\n");
+        DEBUG_FPRINTF(stderr, "[RDMA_HOOKS] eBPF monitor with shared memory initialized successfully\n");
         ebpf_initialized = 1;  // 标记eBPF已初始化
     }
 }

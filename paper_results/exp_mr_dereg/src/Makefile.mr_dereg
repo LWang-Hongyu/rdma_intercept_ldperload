@@ -1,0 +1,37 @@
+# Makefile for MR Deregistration Abuse Test
+
+CXX = g++
+CXXFLAGS = -std=c++11 -O2 -Wall -g
+LDFLAGS = -libverbs -lpthread
+
+TARGET = exp_mr_dereg_abuse
+SRC = exp_mr_dereg_abuse.cpp
+
+.PHONY: all clean
+
+all: $(TARGET)
+
+$(TARGET): $(SRC)
+	$(CXX) $(CXXFLAGS) -o $@ $< $(LDFLAGS)
+	@echo "Build complete: $(TARGET)"
+	@echo "Usage: ./$(TARGET) --help"
+
+clean:
+	rm -f $(TARGET)
+
+# Test targets
+.PHONY: test test_with_intercept test_without_intercept
+
+test: $(TARGET)
+	./$(TARGET) -t 10 -n 50 -b 5
+
+test_with_intercept: $(TARGET)
+	@echo "Running with RDMA interception enabled..."
+	export LD_PRELOAD=/home/why/rdma_intercept_ldpreload/build/librdma_intercept.so && \
+	export RDMA_INTERCEPT_ENABLE=1 && \
+	export RDMA_TENANT_ID=20 && \
+	./$(TARGET) -t 10 -n 50 -b 5
+
+test_without_intercept: $(TARGET)
+	@echo "Running without RDMA interception..."
+	./$(TARGET) -t 10 -n 50 -b 5

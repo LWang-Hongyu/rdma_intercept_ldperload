@@ -1,0 +1,34 @@
+# EXP-8: QP Resource Isolation Test Results
+# Tenant ID: 20
+# Requested QPs: 20
+# Successful: 10
+# Failed: 10
+# Success Rate: 50.0%
+#
+# Latency Statistics (successful creations only):
+#   Average: 3133.00 us
+#   Min: 470.69 us
+#   Max: 26316.27 us
+#
+# Per-QP Details:
+# QP_ID,SUCCESS,LATENCY_US,ERROR_CODE
+0,1,26316.27,0
+1,1,514.44,0
+2,1,568.52,0
+3,1,470.69,0
+4,1,579.40,0
+5,1,609.32,0
+6,1,552.33,0
+7,1,570.69,0
+8,1,550.85,0
+9,1,597.47,0
+10,0,1.43,1
+11,0,1.12,1
+12,0,0.94,1
+13,0,1.04,1
+14,0,0.95,1
+15,0,0.94,1
+16,0,0.95,1
+17,0,1.19,1
+18,0,0.94,1
+19,0,0.94,1

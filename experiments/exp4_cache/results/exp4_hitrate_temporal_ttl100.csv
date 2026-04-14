@@ -1,0 +1,13 @@
+test_type,workload_type,use_cache,adaptive_ttl,num_processes,ttl_ms,
+0,2,1,0,100,100,
+
+metric,value,unit
+hit_rate,100.0000,%
+avg_latency_ns,0.00,ns
+min_latency_ns,0.00,ns
+max_latency_ns,0.00,ns
+p50_latency_ns,0.00,ns
+p99_latency_ns,0.00,ns
+std_dev_ns,0.00,ns
+total_ops,100000,ops
+duration_sec,0.012358,sec

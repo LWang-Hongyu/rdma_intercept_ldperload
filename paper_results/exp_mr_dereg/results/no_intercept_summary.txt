@@ -1,0 +1,14 @@
+[Phase 1] Initial allocation of 50 MRs
+[Phase 1] Completed: 50 MRs registered
+[Phase 2] MR Deregistration Abuse Attack for 15 seconds
+[Phase 2] Pattern: Deregister 10 MRs, then reregister them (repeated)
+[Progress] Time: 5s, Cycles: 1809, Total MR ops: 18090
+[Progress] Time: 10s, Cycles: 3640, Total MR ops: 36400
+[Progress] Time: 15s, Cycles: 5473, Total MR ops: 54730
+[Phase 2] Attack Statistics:
+  Total deregister+register cycles: 5473
+  Total MR operations: 54730
+  Avg deregister latency: 93 us
+  Avg register latency: 180 us
+[Phase 3] Cleanup - Deregister all MRs
+[Phase 3] Completed: 50 MRs deregistered

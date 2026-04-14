@@ -1,0 +1,30 @@
+[Phase 1] Initial allocation of 50 MRs
+Failed to register MR 20
+[Phase 2] MR Deregistration Abuse Attack for 15 seconds
+[Phase 2] Pattern: Deregister 10 MRs, then reregister them (repeated)
+Reregister MR 20 failed
+Reregister MR 20 failed
+Reregister MR 20 failed
+Reregister MR 20 failed
+Reregister MR 20 failed
+Reregister MR 20 failed
+Reregister MR 20 failed
+Reregister MR 20 failed
+Reregister MR 20 failed
+Reregister MR 20 failed
+Reregister MR 20 failed
+Reregister MR 20 failed
+Reregister MR 20 failed
+Reregister MR 20 failed
+Reregister MR 20 failed
+Reregister MR 20 failed
+Reregister MR 20 failed
+Reregister MR 20 failed
+Reregister MR 20 failed
+Reregister MR 20 failed
+Reregister MR 20 failed
+Reregister MR 20 failed
+Reregister MR 20 failed
+Reregister MR 20 failed
+Reregister MR 20 failed
+Reregister MR 20 failed
